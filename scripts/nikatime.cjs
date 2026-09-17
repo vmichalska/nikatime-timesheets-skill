@@ -77,10 +77,12 @@ Options:
   --hours NUMBER   Daily target. Defaults to NikaTime's workdayDuration.
   --note TEXT      Optional note added to every new record.
   --apply          Submit the planned records, then reload and verify.
-  --headless       Run without showing Chrome. Renewal can only succeed if Slack SSO is automatic.
+  --headed         Force a visible Chrome window even if the session looks valid.
 
-The first run opens a dedicated Chrome profile. Complete Slack login there once.
-Later authCookie renewals are automatic while that profile's Slack session remains valid.`);
+Runs headless by default. If the imported session can't renew automatically
+(interactive Slack login or MFA is needed), it transparently reopens the same
+dedicated profile in a visible window so you can complete it; later runs go
+back to headless once that profile's Slack session is valid again.`);
 }
 
 function parseArgs(argv) {
@@ -90,7 +92,7 @@ function parseArgs(argv) {
   const result = {
     command: argv[0] || "inspect",
     apply: false,
-    headless: false,
+    headed: false,
     projectId: undefined,
     month: undefined,
     file: undefined,
@@ -102,7 +104,7 @@ function parseArgs(argv) {
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--apply") result.apply = true;
-    else if (arg === "--headless") result.headless = true;
+    else if (arg === "--headed") result.headed = true;
     else if (arg === "--project-id") result.projectId = argv[++index];
     else if (arg === "--month") result.month = argv[++index];
     else if (arg === "--file") result.file = argv[++index];
@@ -816,28 +818,57 @@ async function main() {
   // Read/decrypt before launching Playwright so a macOS Keychain prompt cannot
   // be hidden behind the automation browser window.
   const preparedChromeCookie = prepareExistingChromeCookie();
-  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
-    channel: "chrome",
-    headless: args.headless,
-    viewport: null,
-  });
 
   const apiCalls = [];
-  context.on("request", (request) => {
-    if (!isNikaTimeApiUrl(request.url())) return;
-    apiCalls.push({
-      method: request.method(),
-      url: request.url(),
-      body: request.postData() ? parseMaybeJson(request.postData()) : undefined,
+  function attachApiListener(ctx) {
+    ctx.on("request", (request) => {
+      if (!isNikaTimeApiUrl(request.url())) return;
+      apiCalls.push({
+        method: request.method(),
+        url: request.url(),
+        body: request.postData() ? parseMaybeJson(request.postData()) : undefined,
+      });
     });
-  });
+  }
+  async function launchContext(headless) {
+    const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
+      channel: "chrome",
+      headless,
+      viewport: null,
+    });
+    attachApiListener(ctx);
+    return ctx;
+  }
+
+  let headless = !args.headed;
+  let context = await launchContext(headless);
 
   try {
-    const pages = context.pages();
-    const page = pages[0] || (await context.newPage());
+    let page = context.pages()[0] || (await context.newPage());
     if (preparedChromeCookie) {
       await importExistingChromeSession(context, preparedChromeCookie);
     }
+
+    if (headless) {
+      const probe = await loadWorkloadOnce(page);
+      const needsInteractiveLogin =
+        /www\.nikatime\.com\/sign-in/i.test(probe.finalUrl) ||
+        probe.status === 0 ||
+        isAuthFailure(probe.status, probe.body);
+      if (needsInteractiveLogin) {
+        console.log(
+          "The imported session could not renew automatically; opening a visible Chrome window to finish Slack login.",
+        );
+        await context.close();
+        headless = false;
+        context = await launchContext(headless);
+        page = context.pages()[0] || (await context.newPage());
+        if (preparedChromeCookie) {
+          await importExistingChromeSession(context, preparedChromeCookie);
+        }
+      }
+    }
+
     const workload = await loadWorkload(page, context);
     await printCookieMetadata(context);
 
