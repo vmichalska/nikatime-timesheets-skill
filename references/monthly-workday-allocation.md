@@ -9,33 +9,28 @@ current session has connected. Keep this file in sync with the Glean skill by
 re-pasting its markdown here if you edit it in Glean.
 
 Produce an evidence-based, day-by-day allocation of a user's weekdays for a
-specified month.
+specified time horizon.
 
 ## Required inputs
 
-Require the user to provide:
+The target time horizon (a day, week, month, or date range; SKILL.md assumes
+today if the user did not name one) and the set of valid labels. Per
+SKILL.md, the label set is **not** the static catalog below — it is pulled
+live for that horizon from `node scripts/nikatime.cjs projects --month
+YYYY-MM` before any investigation starts, since that catalog is a vendored
+snapshot that can go stale. Entries with `timeOff: true` are the valid
+time-off labels; the rest are the valid workstream projects. Classify only
+into labels present in that live list. Do not infer ownership from the
+user's identity, department, previous conversations, or the fact that a
+category appears in the (now historical) catalog below.
 
-- The target month and year.
-- The user's workstream categories, selected from the catalog below.
+## Workstream catalog (historical reference only — do not classify against this)
 
-Do not begin classification until the user has supplied the workstream
-categories. If they provide no categories, ask them to select or paste their
-categories. Do not infer ownership from the user's identity, department,
-previous conversations, or the fact that a category appears in the catalog.
-
-The following time-off labels are always available and do not need to be
-selected:
-
-- Day Off
-- Parental Leave
-- Public Holiday
-- Sick Day
-- Vacation
-
-## Workstream catalog
-
-Use labels exactly as written. Repeated entries in the source list are
-treated as one selectable option.
+This is the catalog as originally vendored from the Glean skill. It is kept
+here only as background on the kind of labels NikaTime has used; it is not
+authoritative and must not be used to classify a day. Always use the live
+label set from step 1 of SKILL.md instead. Use labels exactly as written.
+Repeated entries in the source list are treated as one selectable option.
 
 Activity Simulation
 Activity Sim Perf Test
@@ -230,19 +225,19 @@ UI: Workspaces
 
 ## Classification rules
 
-- Allocate each weekday to exactly one user-selected workstream or one
-  time-off label.
+- Allocate each weekday to exactly one workstream or time-off label from the
+  live label list.
 - Choose the strongest coherent theme for the day, not the last event or the
   highest message count.
 - Prefer the user's own merged code over code merely reviewed or discussed.
 - Use Slack as corroboration or as a secondary signal; do not let casual
   conversation outweigh merged code.
-- Group stacked PRs that implement one feature under that feature's selected
+- Group stacked PRs that implement one feature under that feature's
   workstream.
-- Do not assign a workstream that the user did not select, even if it appears
-  in the catalog.
-- If no selected workstream fits, report the day as Unclassified rather than
-  inventing a label, and explain the gap briefly.
+- Do not assign a workstream that is not present in the live label list,
+  even if it appears in the historical catalog.
+- If nothing in the live label list fits, report the day as Unclassified
+  rather than inventing a label, and explain the gap briefly.
 - Do not force a classification from silence. If a weekday has no
   attributable work evidence, mark it "No attributable activity" or ask
   whether the user wants those days included.
@@ -256,8 +251,7 @@ UI: Workspaces
   vacation, sick leave, parental leave, or a public holiday.
 - Use Sick Day, Parental Leave, or Public Holiday only when explicitly
   supported by calendar, Slack, HR, or another authoritative source.
-- A partial day can be written as: `<selected workstream> — Vacation
-  (afternoon)`.
+- A partial day can be written as: `<workstream> — Vacation (afternoon)`.
 - A full-day time-off label overrides workstream activity for that date.
 - Do not infer time off from a quiet day, missing commits, or lack of Slack
   messages.
@@ -287,17 +281,18 @@ For a partial absence:
 
 After the list, include a compact count by label and a short note for
 excluded weekends, unclassified days, or evidence limitations. Do not include
-unselected catalog labels in the allocation.
+any label absent from the live label list in the allocation.
 
 ## Quality checks
 
 Before responding, verify:
 
-- The user explicitly supplied the workstream categories used.
+- Every label used was present in the live label list pulled from NikaTime
+  for this horizon, not the historical catalog above.
 - Every weekday is accounted for or explicitly excluded.
 - No time-off category is inferred without explicit evidence.
 - Merged code received priority over Slack-only activity.
-- No category outside the user's selected list was assigned.
+- No category outside the live label list was assigned.
 - A mistaken classification is corrected rather than defended when the user
   provides new information.
 - Every factual source-derived claim has a nearby citation.
