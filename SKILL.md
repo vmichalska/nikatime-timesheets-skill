@@ -5,9 +5,12 @@ description: Inspect, preview, create, batch-fill, and safely replace NikaTime w
 
 # NikaTime Timesheets
 
-Use `scripts/nikatime.cjs` for deterministic NikaTime reads and writes. It drives
-the web API through Chrome so NikaTime's `Secure`, `HttpOnly` `authCookie` stays
-browser-managed.
+Use `scripts/nikatime.cjs` for deterministic NikaTime reads and writes. It talks
+to NikaTime's API directly over HTTPS using the `authCookie` decrypted straight
+out of Chrome's own storage; no browser is launched for `projects`, `batch`,
+`replace`, or `fill` unless that session cannot renew itself. `inspect` always
+drives a real Chrome window, since discovering the live API calls the web app
+makes requires watching real browser network traffic.
 
 ## Safety and authorization
 
@@ -27,18 +30,28 @@ browser-managed.
 
 ## Authentication
 
-On macOS, the script can import only NikaTime's encrypted cookie from the default
-Chrome profile. It uses Chrome Safe Storage in memory and does not print the key
-or plaintext cookie. A macOS Keychain prompt may require user approval.
+On macOS, the script decrypts NikaTime's encrypted cookie straight out of the
+default Chrome profile's own storage (Chrome Safe Storage, held in memory) and
+uses that value directly in the `Cookie` header of its own HTTPS requests. It
+does not print the key or plaintext cookie. A macOS Keychain prompt may require
+user approval.
 
-The cookie is stored in a dedicated reusable profile. Every command runs
-headless by default, since the imported cookie makes the session valid without
-a visible browser. If that session can't renew automatically, the script
-transparently reopens the same profile in a visible window and starts
-NikaTime's Slack OAuth flow. Let the user complete credentials or MFA in that
-window; do not automate those secrets. Pass `--headed` to always show the
-window (for example, to watch a run or debug). Set
-`NIKATIME_SKIP_CHROME_IMPORT=1` when the dedicated profile is already
+For `projects`, `batch`, `replace`, and `fill`, this decrypted value is used
+immediately — no browser is opened at all as long as that session is valid.
+If it is missing or cannot renew itself, the script opens a dedicated, reusable
+Chrome profile in a visible window and starts NikaTime's Slack OAuth flow. Let
+the user complete credentials or MFA in that window; do not automate those
+secrets. Once login completes, the script reads the freshly issued cookie back
+out of that browser, closes it, and continues over plain HTTPS for the rest of
+the run.
+
+`inspect` always opens that dedicated profile in Chrome (headless by default,
+since discovering the API calls only requires watching network traffic, not a
+visible window) and falls back to a visible window the same way if its own
+session cannot renew automatically. Pass `--headed` to `inspect` to always show
+the window (for example, to watch a run or debug).
+
+Set `NIKATIME_SKIP_CHROME_IMPORT=1` when the dedicated profile is already
 authenticated and another Keychain prompt is not needed.
 `NIKATIME_BROWSER_PROFILE` can select a shared profile location.
 
@@ -47,10 +60,13 @@ authenticated and another Keychain prompt is not needed.
 Run commands from the skill directory or use the absolute script path. Always
 pass an explicit `--month YYYY-MM`.
 
-The skill includes its Playwright runtime under `scripts/node_modules`. If a
-copied installation does not include it, run
-`cd scripts && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev`; the
-script uses the installed Google Chrome browser rather than downloading one.
+The skill includes its Playwright runtime under `scripts/node_modules`, needed
+only for `inspect` and for interactive session renewal. If a copied
+installation does not include it, run `cd scripts &&
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev`; the script uses the
+installed Google Chrome browser rather than downloading one. `projects`,
+`batch`, `replace`, and `fill` do not need Playwright at all as long as the
+imported session is valid.
 
 1. Inspect the month and validate the account and configured workday duration:
 

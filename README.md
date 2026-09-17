@@ -1,12 +1,16 @@
 # NikaTime Timesheets Skill
 
 An agent skill for safely inspecting and filling NikaTime web timesheets from
-Codex, Claude, or Cursor. It uses the same browser-managed authentication as the
-NikaTime web app and defaults every write operation to a dry run.
+Codex, Claude, or Cursor. It talks to NikaTime directly over HTTPS using a
+cookie decrypted straight from Chrome, only falling back to a real browser
+window when interactive login is actually needed, and defaults every write
+operation to a dry run.
 
 ## What it supports
 
-- Inspect a month and discover the NikaTime API calls used by the web app.
+- Inspect a month and discover the NikaTime API calls used by the web app
+  (the only command that always opens a real Chrome window, since that is
+  how it observes live network traffic).
 - List the exact project IDs available to the signed-in user.
 - Fill one day or multiple missing weekdays.
 - Batch-fill dates from a JSON manifest.
@@ -23,10 +27,12 @@ NikaTime web app and defaults every write operation to a dry run.
 - Node.js and npm.
 - A NikaTime account authenticated through Slack.
 
-The script can import NikaTime's encrypted `authCookie` from Chrome into a
-dedicated automation profile. It never prints the cookie, Slack credentials, or
-MFA secrets. If the session expires, it opens the Slack login flow and reuses the
-renewed browser session.
+The script decrypts NikaTime's encrypted `authCookie` straight from Chrome and
+uses it directly over HTTPS for `projects`, `batch`, `replace`, and `fill` — no
+browser involved as long as that session is valid. It never prints the cookie,
+Slack credentials, or MFA secrets. If the session is missing or expired, it
+opens a dedicated automation profile in a visible Chrome window, completes the
+Slack login flow, and continues with the freshly renewed cookie.
 
 ## Install
 
