@@ -13,6 +13,9 @@ NikaTime web app and defaults every write operation to a dry run.
 - Replace a date with multiple entries for split work and time-off days.
 - Verify exact dates, projects, hours, and notes after writes.
 - Restore and verify previous records if a destructive replacement fails.
+- Optionally classify a month's weekdays from activity evidence (Glean,
+  Slack, GitHub) when the user hasn't specified days or projects, always with
+  confirmation first. See `references/monthly-workday-allocation.md`.
 
 ## Requirements
 
