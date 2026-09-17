@@ -128,21 +128,27 @@ The private web endpoint requires compact `yyyyMMdd` dates on writes despite its
 published schema; the script handles this conversion. Do not reimplement it in an
 ad hoc request unless diagnosing a script defect.
 
-## Filling a month without explicit days or projects
+## Classifying a time horizon without explicit days or projects
 
-If the user asks to fill in a month but has not supplied specific dates,
-project IDs, or a manifest, do not guess or invent an allocation. Tell the
-user you can classify the month's weekdays from their activity evidence (the
-`monthly-workday-allocation` logic in `references/monthly-workday-allocation.md`,
-originally a Glean skill) and ask for a go-ahead before pulling any Slack,
-GitHub, or Glean activity data. Do not run this silently.
+If the user asks to fill in NikaTime but has not supplied specific dates,
+project IDs, or a manifest, the intent is: investigate what the user actually
+did in the given time horizon, categorize each weekday under the available
+labels, confirm those labels with the user, and only then write anything to
+NikaTime. Never guess or invent an allocation, and never write before the
+user has confirmed the labels.
 
-Once the user agrees:
+If no time horizon was given, assume today. Otherwise use whatever horizon
+the user named (a day, a week, a month, a date range); it does not have to
+align with a calendar month, though the underlying `nikatime.cjs` commands
+still operate through `--month` and, where supported, `--date`.
 
-1. Ask which workstream categories apply this month, per the "Required
-   inputs" section of `references/monthly-workday-allocation.md`. Do not
-   infer categories from role, department, or history.
-2. Check whether the `glean_default` MCP server is connected in this session.
+1. Tell the user you can investigate their activity (the
+   `monthly-workday-allocation` logic in
+   `references/monthly-workday-allocation.md`, originally a Glean skill) for
+   that horizon, and ask for a go-ahead before pulling any Slack, GitHub, or
+   Glean activity data. Do not run this silently.
+2. Once the user agrees, check whether the `glean_default` MCP server is
+   connected in this session.
    - If connected, follow `references/monthly-workday-allocation.md`
      directly, using `mcp__glean_default__user_activity`,
      `mcp__glean_default__code_search`, and `mcp__glean_default__search` as
@@ -153,23 +159,28 @@ Once the user agrees:
      integration the current client (Claude, Codex, or Cursor) has
      available, then apply the same evidence and citation rules against
      those sources.
-3. The classification produces a `date -> label` mapping (a workstream or a
-   time-off label). Never hardcode a label-to-project mapping in this repo or
-   in Glean: NikaTime's project IDs, names, and time-off entries all live in
-   one dropdown that changes over time. Resolve it fresh for the target
-   month:
+3. Investigate and classify each weekday in the horizon under the catalog and
+   time-off labels in `references/monthly-workday-allocation.md`, with
+   citations. This produces a `date -> label` mapping.
+4. Present that mapping to the user as a proposed classification, one entry
+   per date, and get explicit confirmation that the labels are correct before
+   proceeding. Correct any label the user disputes and reconfirm.
+5. Only after the labels are confirmed, resolve them against NikaTime.
+   Never hardcode a label-to-project mapping in this repo or in Glean:
+   NikaTime's project IDs, names, and time-off entries all live in one
+   dropdown that changes over time. Resolve it fresh for the target month:
 
    ```bash
    node scripts/nikatime.cjs projects --month 2026-08
    ```
 
    Entries with `timeOff: true` are the time-off labels (Vacation, Sick Day,
-   Day Off, etc.); the rest are workstream projects. Match each classified
+   Day Off, etc.); the rest are workstream projects. Match each confirmed
    label to a live `name` with an exact match. If a label has no exact match,
    or more than one plausible candidate, stop and ask the user — do not
    invent or guess a project ID, per the existing project-resolution rule
    above.
-4. Turn the resolved mapping into a `batch` manifest for ordinary days and a
+6. Turn the resolved mapping into a `batch` manifest for ordinary days and a
    `replace` manifest for split or time-off days, then continue with the
-   normal workflow: preview both dry runs, verify them against the
-   classification, and apply only if the user authorizes it.
+   normal workflow: preview both dry runs, verify them against the confirmed
+   classification, and apply only if the user authorizes the write.
