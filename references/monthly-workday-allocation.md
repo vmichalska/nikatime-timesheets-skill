@@ -1,11 +1,13 @@
 # Monthly Workday Allocation
 
-Vendored from the `monthly-workday-allocation` Glean skill. This is reference material for the
-optional auto-classification fallback described in `SKILL.md` — it is not
-invoked remotely; the agent follows these instructions directly, using
-whichever evidence tools (Glean MCP, or direct Slack/GitHub integrations) the
-current session has connected. Keep this file in sync with the Glean skill by
-re-pasting its markdown here if you edit it in Glean.
+Adapted from the `monthly-workday-allocation` Glean skill. This is reference material for the
+auto-classification workflow described in `SKILL.md` — it is not invoked
+remotely; the agent follows these instructions directly, using whichever
+evidence tools (Glean MCP, or direct Slack/GitHub integrations) the current
+session has connected. Unlike the Glean skill, the valid labels here are
+always pulled live from NikaTime rather than a fixed catalog, so this file
+has intentionally diverged from it; do not copy the Glean skill's catalog
+back into this file.
 
 Produce an evidence-based, day-by-day allocation of a user's weekdays for a
 specified time horizon.
@@ -13,15 +15,13 @@ specified time horizon.
 ## Required inputs
 
 The target time horizon (a day, week, month, or date range; SKILL.md assumes
-today if the user did not name one) and the set of valid labels. Per
-SKILL.md, the label set is **not** the static catalog below — it is pulled
-live for that horizon from `node scripts/nikatime.cjs projects --month
-YYYY-MM` before any investigation starts, since that catalog is a vendored
-snapshot that can go stale. Entries with `timeOff: true` are the valid
-time-off labels; the rest are the valid workstream projects. Classify only
-into labels present in that live list. Do not infer ownership from the
-user's identity, department, previous conversations, or the fact that a
-category appears in the (now historical) catalog below.
+today if the user did not name one) and the set of valid labels. The label
+set is pulled live for that horizon from `node scripts/nikatime.cjs projects
+--month YYYY-MM` before any investigation starts (see SKILL.md step 1).
+Entries with `timeOff: true` are the valid time-off labels; the rest are the
+valid workstream projects. Classify only into labels present in that live
+list. Do not infer ownership from the user's identity, department, or
+previous conversations.
 
 ## Evidence workflow
 
@@ -49,8 +49,7 @@ category appears in the (now historical) catalog below.
   conversation outweigh merged code.
 - Group stacked PRs that implement one feature under that feature's
   workstream.
-- Do not assign a workstream that is not present in the live label list,
-  even if it appears in the historical catalog.
+- Do not assign a workstream that is not present in the live label list.
 - If nothing in the live label list fits, report the day as Unclassified
   rather than inventing a label, and explain the gap briefly.
 - Do not force a classification from silence. If a weekday has no
@@ -103,7 +102,7 @@ any label absent from the live label list in the allocation.
 Before responding, verify:
 
 - Every label used was present in the live label list pulled from NikaTime
-  for this horizon, not the historical catalog above.
+  for this horizon.
 - Every weekday is accounted for or explicitly excluded.
 - No time-off category is inferred without explicit evidence.
 - Merged code received priority over Slack-only activity.
