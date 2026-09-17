@@ -3,9 +3,15 @@
 /*
  * NikaTime timesheet helper.
  *
- * - Keeps NikaTime's HttpOnly authCookie inside a dedicated Chrome profile.
- * - Re-runs Slack OAuth when the session is rejected.
- * - Reads the actual workload request made by the Overview page.
+ * - Decrypts NikaTime's HttpOnly authCookie straight from Chrome's own
+ *   storage and talks to the API directly (no browser) whenever that
+ *   session is valid.
+ * - Falls back to a dedicated Chrome profile only to complete interactive
+ *   Slack OAuth/MFA when the session cannot renew on its own, then hands the
+ *   freshly minted cookie back to the direct HTTP path.
+ * - `inspect` always drives a real browser: its purpose is discovering the
+ *   actual API calls the Overview page makes, which requires watching real
+ *   network traffic.
  * - Defaults to a dry run. It writes records only with --apply.
  */
 
@@ -39,6 +45,7 @@ let PERIOD_START;
 let PERIOD_END;
 let OVERVIEW_URL;
 let PERIOD_LABEL;
+const API_ORIGIN = "https://app.nikatime.com";
 const SLACK_LOGIN_URL = "https://app.nikatime.com/auth/v3/slack-login";
 const PROFILE_DIR =
   process.env.NIKATIME_BROWSER_PROFILE ||
@@ -77,12 +84,16 @@ Options:
   --hours NUMBER   Daily target. Defaults to NikaTime's workdayDuration.
   --note TEXT      Optional note added to every new record.
   --apply          Submit the planned records, then reload and verify.
-  --headed         Force a visible Chrome window even if the session looks valid.
+  --headed         For inspect only: force a visible Chrome window even if
+                   the session looks valid.
 
-Runs headless by default. If the imported session can't renew automatically
-(interactive Slack login or MFA is needed), it transparently reopens the same
-dedicated profile in a visible window so you can complete it; later runs go
-back to headless once that profile's Slack session is valid again.`);
+projects, batch, replace, and fill talk to NikaTime directly over HTTPS using
+the authCookie decrypted from Chrome; no browser is launched unless that
+session cannot renew on its own, in which case a visible Chrome window opens
+just long enough to complete Slack login, then closes. inspect always opens a
+real Chrome window (headless by default, visible if renewal is needed or
+--headed is passed), since discovering the live API calls requires watching
+real browser network traffic.`);
 }
 
 function parseArgs(argv) {
@@ -526,6 +537,24 @@ async function printCookieMetadata(context) {
   });
 }
 
+function printDirectCookieMetadata(session) {
+  const cookie = session.cookie;
+  if (!cookie) {
+    console.log("authCookie: not present");
+    return;
+  }
+  console.log("authCookie:", {
+    domain: cookie.domain,
+    path: cookie.path,
+    secure: cookie.secure,
+    httpOnly: cookie.httpOnly,
+    expires:
+      cookie.expires > 0
+        ? new Date(cookie.expires * 1000).toISOString()
+        : "browser session",
+  });
+}
+
 function summarize(workload) {
   const records = Array.isArray(workload.records) ? workload.records : [];
   const hoursByDate = new Map();
@@ -610,38 +639,71 @@ function buildBatchPlan(workload, entries, defaultHours) {
   });
 }
 
-async function submitPlan(page, plan) {
-  return page.evaluate(async (records) => {
-    const response = await fetch("/api/web/records", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json;charset=UTF-8" },
-      body: JSON.stringify(records),
-    });
-    const text = await response.text();
-    let body;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = text;
-    }
-    return { status: response.status, body };
-  }, plan);
+// --- Direct HTTP client (no browser) -----------------------------------
+//
+// Every read/write NikaTime's own frontend makes goes through same-origin
+// fetch() calls that carry only the authCookie for authentication (no CSRF
+// token, no Origin/Referer check observed). These mirror those calls
+// exactly, using a cookie value obtained either by decrypting it straight
+// out of Chrome, or from an interactive renewal (see establishBrowserSession
+// / renewCookieViaBrowser below).
+
+async function apiFetch(pathname, { method = "GET", body, cookieValue } = {}) {
+  const headers = { Cookie: `authCookie=${cookieValue}` };
+  if (body !== undefined) headers["Content-Type"] = "application/json;charset=UTF-8";
+  const response = await fetch(`${API_ORIGIN}${pathname}`, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    redirect: "follow",
+  });
+  const text = await response.text();
+  return { status: response.status, body: parseMaybeJson(text), finalUrl: response.url };
 }
 
-async function deleteDates(page, dates, targetUser) {
-  return page.evaluate(async ({ dates, targetUser }) => {
-    const response = await fetch("/api/web/records", {
-      method: "DELETE",
-      credentials: "include",
-      headers: { "Content-Type": "application/json;charset=UTF-8" },
-      body: JSON.stringify(dates.map((date) => ({ date: date.replaceAll("-", ""), targetUser }))),
-    });
-    const text = await response.text();
-    let body;
-    try { body = JSON.parse(text); } catch { body = text; }
-    return { status: response.status, body };
-  }, { dates, targetUser });
+function periodQuery(targetUser) {
+  const start = PERIOD_START.replaceAll("-", "");
+  const end = PERIOD_END.replaceAll("-", "");
+  return `dateStart=${start}&dateEnd=${end}&targetUser=${encodeURIComponent(targetUser)}`;
+}
+
+async function directSession(cookieValue) {
+  return apiFetch("/api/web/session", { cookieValue });
+}
+
+async function directWorkloadOnce(cookieValue) {
+  const session = await directSession(cookieValue);
+  const userId = session.body?.result?.user?.userId;
+  if (!userId || session.status !== 200 || session.body?.ok !== true) {
+    return { status: session.status, body: session.body, finalUrl: session.finalUrl };
+  }
+  return apiFetch(`/api/web/user/workload?${periodQuery(userId)}`, { cookieValue });
+}
+
+function isValidWorkloadResult(result) {
+  return (
+    result.status >= 200 &&
+    result.status < 300 &&
+    result.body != null &&
+    result.body.ok === true &&
+    !isAuthFailure(result.status, result.body)
+  );
+}
+
+async function directDropdown(cookieValue, userId) {
+  return apiFetch(`/api/web/project/common/dropdown?${periodQuery(userId)}`, { cookieValue });
+}
+
+async function submitPlan(cookieValue, plan) {
+  return apiFetch("/api/web/records", { method: "POST", body: plan, cookieValue });
+}
+
+async function deleteDates(cookieValue, dates, targetUser) {
+  return apiFetch("/api/web/records", {
+    method: "DELETE",
+    body: dates.map((date) => ({ date: date.replaceAll("-", ""), targetUser })),
+    cookieValue,
+  });
 }
 
 function replacementPayload(workload, entries) {
@@ -689,21 +751,103 @@ function expectedAfterAdd(workload, plan) {
   return { dates, records: [...baseline, ...plan] };
 }
 
-async function restoreDate(page, context, workload, date, backup) {
+// --- Browser fallback (only for `inspect`, and for interactive renewal) --
+
+async function establishBrowserSession(preparedChromeCookie, { forceHeaded = false } = {}) {
+  const { chromium } = loadPlaywright();
+  fs.mkdirSync(PROFILE_DIR, { recursive: true, mode: 0o700 });
+
+  const apiCalls = [];
+  function attachApiListener(ctx) {
+    ctx.on("request", (request) => {
+      if (!isNikaTimeApiUrl(request.url())) return;
+      apiCalls.push({
+        method: request.method(),
+        url: request.url(),
+        body: request.postData() ? parseMaybeJson(request.postData()) : undefined,
+      });
+    });
+  }
+  async function launchContext(headless) {
+    const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
+      channel: "chrome",
+      headless,
+      viewport: null,
+    });
+    attachApiListener(ctx);
+    return ctx;
+  }
+
+  let headless = !forceHeaded;
+  let context = await launchContext(headless);
+  let page = context.pages()[0] || (await context.newPage());
+  if (preparedChromeCookie) {
+    await importExistingChromeSession(context, preparedChromeCookie);
+  }
+
+  let workload;
+  if (headless) {
+    const probe = await loadWorkloadOnce(page);
+    const needsInteractiveLogin =
+      /www\.nikatime\.com\/sign-in/i.test(probe.finalUrl) ||
+      probe.status === 0 ||
+      isAuthFailure(probe.status, probe.body);
+    if (needsInteractiveLogin) {
+      console.log(
+        "The imported session could not renew automatically; opening a visible Chrome window to finish Slack login.",
+      );
+      await context.close();
+      headless = false;
+      context = await launchContext(headless);
+      page = context.pages()[0] || (await context.newPage());
+      if (preparedChromeCookie) {
+        await importExistingChromeSession(context, preparedChromeCookie);
+      }
+      workload = await loadWorkload(page, context);
+    } else if (
+      probe.status < 200 ||
+      probe.status >= 300 ||
+      !probe.body ||
+      probe.body.ok !== true
+    ) {
+      workload = await loadWorkload(page, context);
+    } else {
+      workload = probe.body.result;
+    }
+  } else {
+    workload = await loadWorkload(page, context);
+  }
+
+  return { context, page, apiCalls, workload };
+}
+
+async function renewCookieViaBrowser(preparedChromeCookie) {
+  const { context } = await establishBrowserSession(preparedChromeCookie);
   try {
-    // Reload first so loadWorkload can renew an expired Slack-backed session.
-    // If the original operation never changed the date, avoid another delete.
-    const current = await loadWorkload(page, context);
+    const cookies = await context.cookies("https://app.nikatime.com");
+    const cookie = cookies.find((item) => item.name === "authCookie");
+    if (!cookie) {
+      throw new Error("Session established in Chrome but no authCookie was set; cannot continue.");
+    }
+    return cookie;
+  } finally {
+    await context.close();
+  }
+}
+
+async function restoreDate(session, ensureWorkload, workload, date, backup) {
+  try {
+    const current = await ensureWorkload();
     const currentComparison = comparePlan(current, backup, {
       exactDates: true,
       dates: [date],
     });
     if (currentComparison.ok) return { restored: true };
 
-    let cleanup = await deleteDates(page, [date], workload.userId);
+    let cleanup = await deleteDates(session.cookie.value, [date], workload.userId);
     if (isAuthFailure(cleanup.status, cleanup.body)) {
-      await loadWorkload(page, context);
-      cleanup = await deleteDates(page, [date], workload.userId);
+      await ensureWorkload();
+      cleanup = await deleteDates(session.cookie.value, [date], workload.userId);
     }
     if (!responseSucceeded(cleanup)) {
       return {
@@ -712,17 +856,17 @@ async function restoreDate(page, context, workload, date, backup) {
       };
     }
     if (backup.length > 0) {
-      let restoration = await submitPlan(page, backup);
+      let restoration = await submitPlan(session.cookie.value, backup);
       if (isAuthFailure(restoration.status, restoration.body)) {
-        await loadWorkload(page, context);
-        const renewedCleanup = await deleteDates(page, [date], workload.userId);
+        await ensureWorkload();
+        const renewedCleanup = await deleteDates(session.cookie.value, [date], workload.userId);
         if (!responseSucceeded(renewedCleanup)) {
           return {
             restored: false,
             error: `renewed cleanup failed (HTTP ${renewedCleanup.status}): ${JSON.stringify(renewedCleanup.body)}`,
           };
         }
-        restoration = await submitPlan(page, backup);
+        restoration = await submitPlan(session.cookie.value, backup);
       }
       if (!responseSucceeded(restoration)) {
         return {
@@ -731,7 +875,7 @@ async function restoreDate(page, context, workload, date, backup) {
         };
       }
     }
-    const verified = await loadWorkload(page, context);
+    const verified = await ensureWorkload();
     const comparison = comparePlan(verified, backup, { exactDates: true, dates: [date] });
     if (!comparison.ok) {
       return { restored: false, error: `restore verification mismatch: ${JSON.stringify(comparison)}` };
@@ -742,38 +886,20 @@ async function restoreDate(page, context, workload, date, backup) {
   }
 }
 
-async function listProjects(page, apiCalls) {
-  const workloadCall = apiCalls.find((call) => isOverviewWorkload(call.url));
-  if (!workloadCall) {
-    throw new Error("Could not derive the project dropdown request from the Overview page.");
-  }
-
-  const dropdownUrl = new URL(workloadCall.url);
-  dropdownUrl.pathname = "/api/web/project/common/dropdown";
-  const response = await page.evaluate(async (url) => {
-    const result = await fetch(url, { credentials: "include" });
-    const text = await result.text();
-    let body;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = text;
-    }
-    return { status: result.status, body };
-  }, dropdownUrl.toString());
-
+async function directListProjects(cookieValue, userId) {
+  const dropdown = await directDropdown(cookieValue, userId);
   if (
-    response.status < 200 ||
-    response.status >= 300 ||
-    response.body?.ok === false
+    dropdown.status < 200 ||
+    dropdown.status >= 300 ||
+    dropdown.body?.ok === false
   ) {
     throw new Error(
-      `Could not list projects (HTTP ${response.status}): ${JSON.stringify(response.body)}`,
+      `Could not list projects (HTTP ${dropdown.status}): ${JSON.stringify(dropdown.body)}`,
     );
   }
 
   const projects = [];
-  for (const group of response.body?.result || []) {
+  for (const group of dropdown.body?.result || []) {
     for (const [key, value] of Object.entries(group.options || {})) {
       projects.push({
         group: group.header,
@@ -784,6 +910,244 @@ async function listProjects(page, apiCalls) {
     }
   }
   console.log(JSON.stringify(projects, null, 2));
+}
+
+async function runInspect(args, preparedChromeCookie) {
+  const { context, apiCalls, workload } = await establishBrowserSession(preparedChromeCookie, {
+    forceHeaded: args.headed,
+  });
+  try {
+    await printCookieMetadata(context);
+
+    const summary = summarize(workload);
+    const configuredTarget = Number(workload.workdayDuration || 8);
+    validateHours(configuredTarget, "NikaTime workdayDuration");
+    console.log(`${PERIOD_LABEL} summary:`, {
+      userId: workload.userId,
+      name: workload.name,
+      weekdays: summary.periodWeekdays.length,
+      enteredHours: summary.total,
+      workdayDuration: configuredTarget,
+      expectedHours: summary.periodWeekdays.length * configuredTarget,
+    });
+
+    console.log("Observed NikaTime API calls (cookies and headers omitted):");
+    console.log(JSON.stringify(apiCalls, null, 2));
+  } finally {
+    await context.close();
+  }
+}
+
+async function runDirectCommand(args, preparedChromeCookie) {
+  const session = { cookie: preparedChromeCookie || null };
+
+  async function ensureWorkload() {
+    if (session.cookie) {
+      const probe = await directWorkloadOnce(session.cookie.value);
+      if (isValidWorkloadResult(probe)) return probe.body.result;
+    }
+    session.cookie = await renewCookieViaBrowser(preparedChromeCookie);
+    const result = await directWorkloadOnce(session.cookie.value);
+    if (!isValidWorkloadResult(result)) {
+      throw new Error(
+        `Could not load ${PERIOD_LABEL} workload (HTTP ${result.status}): ${JSON.stringify(result.body)}`,
+      );
+    }
+    return result.body.result;
+  }
+
+  const workload = await ensureWorkload();
+  printDirectCookieMetadata(session);
+
+  const summary = summarize(workload);
+  const configuredTarget = Number(workload.workdayDuration || 8);
+  validateHours(configuredTarget, "NikaTime workdayDuration");
+  console.log(`${PERIOD_LABEL} summary:`, {
+    userId: workload.userId,
+    name: workload.name,
+    weekdays: summary.periodWeekdays.length,
+    enteredHours: summary.total,
+    workdayDuration: configuredTarget,
+    expectedHours: summary.periodWeekdays.length * configuredTarget,
+  });
+
+  if (args.command === "projects") {
+    await directListProjects(session.cookie.value, workload.userId);
+    return;
+  }
+
+  async function submit(plan) {
+    let result = await submitPlan(session.cookie.value, plan);
+    if (isAuthFailure(result.status, result.body)) {
+      session.cookie = await renewCookieViaBrowser(preparedChromeCookie);
+      result = await submitPlan(session.cookie.value, plan);
+    }
+    return result;
+  }
+
+  async function del(dates, targetUser) {
+    let result = await deleteDates(session.cookie.value, dates, targetUser);
+    if (isAuthFailure(result.status, result.body)) {
+      session.cookie = await renewCookieViaBrowser(preparedChromeCookie);
+      result = await deleteDates(session.cookie.value, dates, targetUser);
+    }
+    return result;
+  }
+
+  if (args.command === "batch") {
+    const entries = JSON.parse(fs.readFileSync(path.resolve(args.file), "utf8"));
+    if (!Array.isArray(entries)) throw new Error("Batch file must contain a JSON array");
+    const plan = buildBatchPlan(workload, entries, configuredTarget);
+    const expectedState = expectedAfterAdd(workload, plan);
+    console.log(JSON.stringify({ dryRun: !args.apply, recordCount: plan.length, records: plan }, null, 2));
+    if (!args.apply || plan.length === 0) {
+      console.log(args.apply ? "Nothing to add." : "Dry run only; no NikaTime records were changed.");
+      return;
+    }
+    const submission = await submit(plan);
+    if (!responseSucceeded(submission)) {
+      throw new Error(`NikaTime rejected the batch (HTTP ${submission.status}): ${JSON.stringify(submission.body)}`);
+    }
+    const verified = await ensureWorkload();
+    const remaining = buildBatchPlan(verified, entries, configuredTarget);
+    const comparison = comparePlan(verified, expectedState.records, {
+      exactDates: true,
+      dates: expectedState.dates,
+    });
+    console.log("Verification:", {
+      remainingRecords: remaining.length,
+      exactRecordsPresent: comparison.ok,
+    });
+    if (remaining.length || !comparison.ok) {
+      throw new Error(`Batch verification mismatch: ${JSON.stringify({ remaining, comparison })}`);
+    }
+    return;
+  }
+
+  if (args.command === "replace") {
+    const entries = JSON.parse(fs.readFileSync(path.resolve(args.file), "utf8"));
+    if (!Array.isArray(entries) || entries.length === 0) throw new Error("Replacement file must contain entries");
+    const plan = replacementPayload(workload, entries);
+    const date = entries[0].date;
+    const backup = backupDate(workload, date);
+    console.log(JSON.stringify({ dryRun: !args.apply, date, previous: backup, replacement: plan }, null, 2));
+    if (!args.apply) {
+      console.log("Dry run only; no NikaTime records were changed.");
+      return;
+    }
+    let comparison;
+    try {
+      const deletion = await del([date], workload.userId);
+      if (!responseSucceeded(deletion)) {
+        throw new Error(`NikaTime rejected the date deletion (HTTP ${deletion.status}): ${JSON.stringify(deletion.body)}`);
+      }
+      const submission = await submit(plan);
+      if (!responseSucceeded(submission)) {
+        throw new Error(`NikaTime rejected the replacement (HTTP ${submission.status}): ${JSON.stringify(submission.body)}`);
+      }
+      const verified = await ensureWorkload();
+      comparison = comparePlan(verified, plan, { exactDates: true, dates: [date] });
+      if (!comparison.ok) {
+        throw new Error(`Replacement verification mismatch: ${JSON.stringify(comparison)}`);
+      }
+    } catch (error) {
+      const restoration = await restoreDate(session, ensureWorkload, workload, date, backup);
+      if (restoration.restored) {
+        throw new Error(`${error.message || error}; previous records were verified restored.`);
+      }
+      throw new Error(`URGENT: replacement and automatic restoration both failed for ${date}. Review NikaTime manually. Cause: ${error.message || error}; restoration: ${restoration.error}`);
+    }
+    console.log("Verification:", {
+      date,
+      records: comparison.actual,
+      totalHours: plan.reduce((sum, entry) => sum + entry.hours, 0),
+    });
+    return;
+  }
+
+  // fill
+  const targetHours = args.hours ?? configuredTarget;
+  validateHours(targetHours, "fill");
+  const plan = buildPlan(
+    workload,
+    args.projectId,
+    targetHours,
+    args.note,
+    args.date,
+  );
+  const plannedHours = plan.reduce((sum, record) => sum + record.hours, 0);
+  console.log(
+    JSON.stringify(
+      {
+        dryRun: !args.apply,
+        projectId: args.projectId,
+        targetHours,
+        recordCount: plan.length,
+        plannedHours,
+        records: plan,
+      },
+      null,
+      2,
+    ),
+  );
+
+  if (!args.apply || plan.length === 0) {
+    if (!args.apply) console.log("Dry run only; no NikaTime records were changed.");
+    else console.log("Nothing to add.");
+    return;
+  }
+
+  let appliedPlan = plan;
+  let appliedBaseline = workload;
+  const submission = await submitPlan(session.cookie.value, plan);
+  if (isAuthFailure(submission.status, submission.body)) {
+    console.log("Session expired before submission; renewing and rebuilding the plan.");
+    session.cookie = await renewCookieViaBrowser(preparedChromeCookie);
+    const refreshed = await ensureWorkload();
+    const refreshedPlan = buildPlan(
+      refreshed,
+      args.projectId,
+      targetHours,
+      args.note,
+      args.date,
+    );
+    appliedPlan = refreshedPlan;
+    appliedBaseline = refreshed;
+    const retry = await submitPlan(session.cookie.value, refreshedPlan);
+    if (!responseSucceeded(retry)) {
+      throw new Error(
+        `NikaTime rejected the renewed submission (HTTP ${retry.status}): ${JSON.stringify(retry.body)}`,
+      );
+    }
+  } else if (!responseSucceeded(submission)) {
+    throw new Error(
+      `NikaTime rejected the submission (HTTP ${submission.status}): ${JSON.stringify(submission.body)}`,
+    );
+  }
+
+  const verified = await ensureWorkload();
+  const remaining = buildPlan(
+    verified,
+    args.projectId,
+    targetHours,
+    args.note,
+    args.date,
+  );
+  const remainingHours = remaining.reduce((sum, record) => sum + record.hours, 0);
+  const expectedState = expectedAfterAdd(appliedBaseline, appliedPlan);
+  const comparison = comparePlan(verified, expectedState.records, {
+    exactDates: true,
+    dates: expectedState.dates,
+  });
+  console.log("Verification:", {
+    remainingWeekdays: remaining.length,
+    remainingHours,
+    exactRecordsPresent: comparison.ok,
+  });
+  if (remaining.length !== 0 || !comparison.ok) {
+    process.exitCode = 2;
+    console.error(`Verification mismatch for ${PERIOD_LABEL}: ${JSON.stringify(comparison)}. Review the calendar before rerunning.`);
+  }
 }
 
 async function main() {
@@ -813,244 +1177,16 @@ async function main() {
     validateNotes(args.note, "fill");
   }
 
-  const { chromium } = loadPlaywright();
-  fs.mkdirSync(PROFILE_DIR, { recursive: true, mode: 0o700 });
-  // Read/decrypt before launching Playwright so a macOS Keychain prompt cannot
-  // be hidden behind the automation browser window.
+  // Read/decrypt before doing anything else so a macOS Keychain prompt cannot
+  // be hidden behind an automation browser window that may never open.
   const preparedChromeCookie = prepareExistingChromeCookie();
 
-  const apiCalls = [];
-  function attachApiListener(ctx) {
-    ctx.on("request", (request) => {
-      if (!isNikaTimeApiUrl(request.url())) return;
-      apiCalls.push({
-        method: request.method(),
-        url: request.url(),
-        body: request.postData() ? parseMaybeJson(request.postData()) : undefined,
-      });
-    });
-  }
-  async function launchContext(headless) {
-    const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-      channel: "chrome",
-      headless,
-      viewport: null,
-    });
-    attachApiListener(ctx);
-    return ctx;
+  if (args.command === "inspect") {
+    await runInspect(args, preparedChromeCookie);
+    return;
   }
 
-  let headless = !args.headed;
-  let context = await launchContext(headless);
-
-  try {
-    let page = context.pages()[0] || (await context.newPage());
-    if (preparedChromeCookie) {
-      await importExistingChromeSession(context, preparedChromeCookie);
-    }
-
-    if (headless) {
-      const probe = await loadWorkloadOnce(page);
-      const needsInteractiveLogin =
-        /www\.nikatime\.com\/sign-in/i.test(probe.finalUrl) ||
-        probe.status === 0 ||
-        isAuthFailure(probe.status, probe.body);
-      if (needsInteractiveLogin) {
-        console.log(
-          "The imported session could not renew automatically; opening a visible Chrome window to finish Slack login.",
-        );
-        await context.close();
-        headless = false;
-        context = await launchContext(headless);
-        page = context.pages()[0] || (await context.newPage());
-        if (preparedChromeCookie) {
-          await importExistingChromeSession(context, preparedChromeCookie);
-        }
-      }
-    }
-
-    const workload = await loadWorkload(page, context);
-    await printCookieMetadata(context);
-
-    const summary = summarize(workload);
-    const configuredTarget = Number(workload.workdayDuration || 8);
-    validateHours(configuredTarget, "NikaTime workdayDuration");
-    console.log(`${PERIOD_LABEL} summary:`, {
-      userId: workload.userId,
-      name: workload.name,
-      weekdays: summary.periodWeekdays.length,
-      enteredHours: summary.total,
-      workdayDuration: configuredTarget,
-      expectedHours: summary.periodWeekdays.length * configuredTarget,
-    });
-
-    if (args.command === "inspect") {
-      console.log("Observed NikaTime API calls (cookies and headers omitted):");
-      console.log(JSON.stringify(apiCalls, null, 2));
-      return;
-    }
-
-    if (args.command === "projects") {
-      await listProjects(page, apiCalls);
-      return;
-    }
-
-    if (args.command === "batch") {
-      const entries = JSON.parse(fs.readFileSync(path.resolve(args.file), "utf8"));
-      if (!Array.isArray(entries)) throw new Error("Batch file must contain a JSON array");
-      const plan = buildBatchPlan(workload, entries, configuredTarget);
-      const expectedState = expectedAfterAdd(workload, plan);
-      console.log(JSON.stringify({ dryRun: !args.apply, recordCount: plan.length, records: plan }, null, 2));
-      if (!args.apply || plan.length === 0) {
-        console.log(args.apply ? "Nothing to add." : "Dry run only; no NikaTime records were changed.");
-        return;
-      }
-      const submission = await submitPlan(page, plan);
-      if (!responseSucceeded(submission)) {
-        throw new Error(`NikaTime rejected the batch (HTTP ${submission.status}): ${JSON.stringify(submission.body)}`);
-      }
-      const verified = await loadWorkload(page, context);
-      const remaining = buildBatchPlan(verified, entries, configuredTarget);
-      const comparison = comparePlan(verified, expectedState.records, {
-        exactDates: true,
-        dates: expectedState.dates,
-      });
-      console.log("Verification:", {
-        remainingRecords: remaining.length,
-        exactRecordsPresent: comparison.ok,
-      });
-      if (remaining.length || !comparison.ok) {
-        throw new Error(`Batch verification mismatch: ${JSON.stringify({ remaining, comparison })}`);
-      }
-      return;
-    }
-
-    if (args.command === "replace") {
-      const entries = JSON.parse(fs.readFileSync(path.resolve(args.file), "utf8"));
-      if (!Array.isArray(entries) || entries.length === 0) throw new Error("Replacement file must contain entries");
-      const plan = replacementPayload(workload, entries);
-      const date = entries[0].date;
-      const backup = backupDate(workload, date);
-      console.log(JSON.stringify({ dryRun: !args.apply, date, previous: backup, replacement: plan }, null, 2));
-      if (!args.apply) {
-        console.log("Dry run only; no NikaTime records were changed.");
-        return;
-      }
-      let comparison;
-      try {
-        const deletion = await deleteDates(page, [date], workload.userId);
-        if (!responseSucceeded(deletion)) {
-          throw new Error(`NikaTime rejected the date deletion (HTTP ${deletion.status}): ${JSON.stringify(deletion.body)}`);
-        }
-        const submission = await submitPlan(page, plan);
-        if (!responseSucceeded(submission)) {
-          throw new Error(`NikaTime rejected the replacement (HTTP ${submission.status}): ${JSON.stringify(submission.body)}`);
-        }
-        const verified = await loadWorkload(page, context);
-        comparison = comparePlan(verified, plan, { exactDates: true, dates: [date] });
-        if (!comparison.ok) {
-          throw new Error(`Replacement verification mismatch: ${JSON.stringify(comparison)}`);
-        }
-      } catch (error) {
-        const restoration = await restoreDate(page, context, workload, date, backup);
-        if (restoration.restored) {
-          throw new Error(`${error.message || error}; previous records were verified restored.`);
-        }
-        throw new Error(`URGENT: replacement and automatic restoration both failed for ${date}. Review NikaTime manually. Cause: ${error.message || error}; restoration: ${restoration.error}`);
-      }
-      console.log("Verification:", {
-        date,
-        records: comparison.actual,
-        totalHours: plan.reduce((sum, entry) => sum + entry.hours, 0),
-      });
-      return;
-    }
-
-    const targetHours = args.hours ?? configuredTarget;
-    validateHours(targetHours, "fill");
-    const plan = buildPlan(
-      workload,
-      args.projectId,
-      targetHours,
-      args.note,
-      args.date,
-    );
-    const plannedHours = plan.reduce((sum, record) => sum + record.hours, 0);
-    console.log(
-      JSON.stringify(
-        {
-          dryRun: !args.apply,
-          projectId: args.projectId,
-          targetHours,
-          recordCount: plan.length,
-          plannedHours,
-          records: plan,
-        },
-        null,
-        2,
-      ),
-    );
-
-    if (!args.apply || plan.length === 0) {
-      if (!args.apply) console.log("Dry run only; no NikaTime records were changed.");
-      else console.log("Nothing to add.");
-      return;
-    }
-
-    let appliedPlan = plan;
-    let appliedBaseline = workload;
-    const submission = await submitPlan(page, plan);
-    if (isAuthFailure(submission.status, submission.body)) {
-      console.log("Session expired before submission; renewing and rebuilding the plan.");
-      await completeSlackLogin(page);
-      const refreshed = await loadWorkload(page, context);
-      const refreshedPlan = buildPlan(
-        refreshed,
-        args.projectId,
-        targetHours,
-        args.note,
-        args.date,
-      );
-      appliedPlan = refreshedPlan;
-      appliedBaseline = refreshed;
-      const retry = await submitPlan(page, refreshedPlan);
-      if (!responseSucceeded(retry)) {
-        throw new Error(
-          `NikaTime rejected the renewed submission (HTTP ${retry.status}): ${JSON.stringify(retry.body)}`,
-        );
-      }
-    } else if (!responseSucceeded(submission)) {
-      throw new Error(
-        `NikaTime rejected the submission (HTTP ${submission.status}): ${JSON.stringify(submission.body)}`,
-      );
-    }
-
-    const verified = await loadWorkload(page, context);
-    const remaining = buildPlan(
-      verified,
-      args.projectId,
-      targetHours,
-      args.note,
-      args.date,
-    );
-    const remainingHours = remaining.reduce((sum, record) => sum + record.hours, 0);
-    const expectedState = expectedAfterAdd(appliedBaseline, appliedPlan);
-    const comparison = comparePlan(verified, expectedState.records, {
-      exactDates: true,
-      dates: expectedState.dates,
-    });
-    console.log("Verification:", {
-      remainingWeekdays: remaining.length,
-      remainingHours,
-      exactRecordsPresent: comparison.ok,
-    });
-    if (remaining.length !== 0 || !comparison.ok) {
-      process.exitCode = 2;
-      console.error(`Verification mismatch for ${PERIOD_LABEL}: ${JSON.stringify(comparison)}. Review the calendar before rerunning.`);
-    }
-  } finally {
-    await context.close();
-  }
+  await runDirectCommand(args, preparedChromeCookie);
 }
 
 main().catch((error) => {
