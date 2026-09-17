@@ -142,13 +142,12 @@ the user named (a day, a week, a month, a date range); it does not have to
 align with a calendar month, though the underlying `nikatime.cjs` commands
 still operate through `--month` and, where supported, `--date`.
 
-1. Tell the user you can investigate their activity (the
+1. Go straight into investigating the user's activity for that horizon (the
    `monthly-workday-allocation` logic in
-   `references/monthly-workday-allocation.md`, originally a Glean skill) for
-   that horizon, and ask for a go-ahead before pulling any Slack, GitHub, or
-   Glean activity data. Do not run this silently.
-2. Once the user agrees, check whether the `glean_default` MCP server is
-   connected in this session.
+   `references/monthly-workday-allocation.md`, originally a Glean skill) —
+   do not ask for permission before pulling Slack, GitHub, or Glean activity
+   data.
+2. Check whether the `glean_default` MCP server is connected in this session.
    - If connected, follow `references/monthly-workday-allocation.md`
      directly, using `mcp__glean_default__user_activity`,
      `mcp__glean_default__code_search`, and `mcp__glean_default__search` as
