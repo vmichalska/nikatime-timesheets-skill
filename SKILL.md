@@ -142,12 +142,10 @@ the user named (a day, a week, a month, a date range); it does not have to
 align with a calendar month, though the underlying `nikatime.cjs` commands
 still operate through `--month` and, where supported, `--date`.
 
-1. Pull the live label set first, before investigating anything. Never
-   classify against the static catalog written into
-   `references/monthly-workday-allocation.md` — it is a vendored snapshot
-   that can go stale, since NikaTime's project IDs, names, and time-off
-   entries all live in one dropdown that changes over time. Resolve it fresh
-   for the target month:
+1. Pull the live label set first, before investigating anything. NikaTime's
+   project IDs, names, and time-off entries all live in one dropdown that
+   changes over time, so resolve it fresh for the target month rather than
+   assuming any fixed list:
 
    ```bash
    node scripts/nikatime.cjs projects --month 2026-08
