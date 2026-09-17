@@ -142,12 +142,26 @@ the user named (a day, a week, a month, a date range); it does not have to
 align with a calendar month, though the underlying `nikatime.cjs` commands
 still operate through `--month` and, where supported, `--date`.
 
-1. Go straight into investigating the user's activity for that horizon (the
-   `monthly-workday-allocation` logic in
+1. Pull the live label set first, before investigating anything. Never
+   classify against the static catalog written into
+   `references/monthly-workday-allocation.md` — it is a vendored snapshot
+   that can go stale, since NikaTime's project IDs, names, and time-off
+   entries all live in one dropdown that changes over time. Resolve it fresh
+   for the target month:
+
+   ```bash
+   node scripts/nikatime.cjs projects --month 2026-08
+   ```
+
+   Entries with `timeOff: true` are the available time-off labels; the rest
+   are the available workstream projects. This live list is the only valid
+   set of labels to classify into.
+2. Go straight into investigating the user's activity for that horizon (the
+   evidence workflow, classification rules, and time-off rules in
    `references/monthly-workday-allocation.md`, originally a Glean skill) —
    do not ask for permission before pulling Slack, GitHub, or Glean activity
    data.
-2. Check whether the `glean_default` MCP server is connected in this session.
+3. Check whether the `glean_default` MCP server is connected in this session.
    - If connected, follow `references/monthly-workday-allocation.md`
      directly, using `mcp__glean_default__user_activity`,
      `mcp__glean_default__code_search`, and `mcp__glean_default__search` as
@@ -158,28 +172,15 @@ still operate through `--month` and, where supported, `--date`.
      integration the current client (Claude, Codex, or Cursor) has
      available, then apply the same evidence and citation rules against
      those sources.
-3. Investigate and classify each weekday in the horizon under the catalog and
-   time-off labels in `references/monthly-workday-allocation.md`, with
-   citations. This produces a `date -> label` mapping.
-4. Present that mapping to the user as a proposed classification, one entry
+4. Classify each weekday in the horizon under the live labels pulled in step
+   1, with citations. Match each classification to a live `name` with an
+   exact match. If nothing in the live list fits, report the day as
+   Unclassified rather than inventing a label — do not guess or invent a
+   project ID or name. This produces a `date -> live label` mapping.
+5. Present that mapping to the user as a proposed classification, one entry
    per date, and get explicit confirmation that the labels are correct before
    proceeding. Correct any label the user disputes and reconfirm.
-5. Only after the labels are confirmed, resolve them against NikaTime.
-   Never hardcode a label-to-project mapping in this repo or in Glean:
-   NikaTime's project IDs, names, and time-off entries all live in one
-   dropdown that changes over time. Resolve it fresh for the target month:
-
-   ```bash
-   node scripts/nikatime.cjs projects --month 2026-08
-   ```
-
-   Entries with `timeOff: true` are the time-off labels (Vacation, Sick Day,
-   Day Off, etc.); the rest are workstream projects. Match each confirmed
-   label to a live `name` with an exact match. If a label has no exact match,
-   or more than one plausible candidate, stop and ask the user — do not
-   invent or guess a project ID, per the existing project-resolution rule
-   above.
-6. Turn the resolved mapping into a `batch` manifest for ordinary days and a
+6. Turn the confirmed mapping into a `batch` manifest for ordinary days and a
    `replace` manifest for split or time-off days, then continue with the
    normal workflow: preview both dry runs, verify them against the confirmed
    classification, and apply only if the user authorizes the write.
