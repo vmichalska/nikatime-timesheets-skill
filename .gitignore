@@ -1,0 +1,8 @@
+.DS_Store
+scripts/node_modules/
+
+# Browser state and authentication must never be committed.
+chrome-profile/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
