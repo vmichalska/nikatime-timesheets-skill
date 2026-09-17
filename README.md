@@ -30,22 +30,19 @@ renewed browser session.
 
 ## Install
 
-Clone the repository to one canonical location of your choice, install the
-runtime dependency, and symlink it into the clients you use. Set `REPO_DIR`
-once and the rest is copy-paste:
+Clone the repository straight into one client's skills folder, install the
+runtime dependency, then symlink the other clients to that same clone:
 
 ```bash
-REPO_DIR="$HOME/.local/share/agent-skills/nikatime-timesheets"  # pick any location
+git clone https://github.com/vmichalska/nikatime-timesheets-skill.git \
+  "$HOME/.claude/skills/nikatime-timesheets"
 
-git clone https://github.com/vmichalska/nikatime-timesheets-skill.git "$REPO_DIR"
-
-cd "$REPO_DIR/scripts"
+cd "$HOME/.claude/skills/nikatime-timesheets/scripts"
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev
 
-mkdir -p "$HOME/.codex/skills" "$HOME/.claude/skills" "$HOME/.cursor/skills"
-ln -s "$REPO_DIR" "$HOME/.codex/skills/nikatime-timesheets"
-ln -s "$REPO_DIR" "$HOME/.claude/skills/nikatime-timesheets"
-ln -s "$REPO_DIR" "$HOME/.cursor/skills/nikatime-timesheets"
+mkdir -p "$HOME/.codex/skills" "$HOME/.cursor/skills"
+ln -s "$HOME/.claude/skills/nikatime-timesheets" "$HOME/.codex/skills/nikatime-timesheets"
+ln -s "$HOME/.claude/skills/nikatime-timesheets" "$HOME/.cursor/skills/nikatime-timesheets"
 ```
 
 Restart or reload an already-open client so it discovers the skill.
