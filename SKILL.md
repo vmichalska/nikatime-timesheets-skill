@@ -31,11 +31,16 @@ On macOS, the script can import only NikaTime's encrypted cookie from the defaul
 Chrome profile. It uses Chrome Safe Storage in memory and does not print the key
 or plaintext cookie. A macOS Keychain prompt may require user approval.
 
-The cookie is stored in a dedicated reusable profile. If that session expires,
-the script opens NikaTime's Slack OAuth flow. Let the user complete credentials or
-MFA; do not automate those secrets. Set `NIKATIME_SKIP_CHROME_IMPORT=1` when the
-dedicated profile is already authenticated and another Keychain prompt is not
-needed. `NIKATIME_BROWSER_PROFILE` can select a shared profile location.
+The cookie is stored in a dedicated reusable profile. Every command runs
+headless by default, since the imported cookie makes the session valid without
+a visible browser. If that session can't renew automatically, the script
+transparently reopens the same profile in a visible window and starts
+NikaTime's Slack OAuth flow. Let the user complete credentials or MFA in that
+window; do not automate those secrets. Pass `--headed` to always show the
+window (for example, to watch a run or debug). Set
+`NIKATIME_SKIP_CHROME_IMPORT=1` when the dedicated profile is already
+authenticated and another Keychain prompt is not needed.
+`NIKATIME_BROWSER_PROFILE` can select a shared profile location.
 
 ## Workflow
 
