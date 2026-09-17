@@ -122,3 +122,49 @@ manual review of that date.
 The private web endpoint requires compact `yyyyMMdd` dates on writes despite its
 published schema; the script handles this conversion. Do not reimplement it in an
 ad hoc request unless diagnosing a script defect.
+
+## Filling a month without explicit days or projects
+
+If the user asks to fill in a month but has not supplied specific dates,
+project IDs, or a manifest, do not guess or invent an allocation. Tell the
+user you can classify the month's weekdays from their activity evidence (the
+`monthly-workday-allocation` logic in `references/monthly-workday-allocation.md`,
+originally a Glean skill) and ask for a go-ahead before pulling any Slack,
+GitHub, or Glean activity data. Do not run this silently.
+
+Once the user agrees:
+
+1. Ask which workstream categories apply this month, per the "Required
+   inputs" section of `references/monthly-workday-allocation.md`. Do not
+   infer categories from role, department, or history.
+2. Check whether the `glean_default` MCP server is connected in this session.
+   - If connected, follow `references/monthly-workday-allocation.md`
+     directly, using `mcp__glean_default__user_activity`,
+     `mcp__glean_default__code_search`, and `mcp__glean_default__search` as
+     its evidence tools.
+   - If Glean is not connected, or its results show no indexed Slack or
+     GitHub activity for the user, stop and ask whether the agent should
+     instead connect to Slack and GitHub directly through whatever
+     integration the current client (Claude, Codex, or Cursor) has
+     available, then apply the same evidence and citation rules against
+     those sources.
+3. The classification produces a `date -> label` mapping (a workstream or a
+   time-off label). Never hardcode a label-to-project mapping in this repo or
+   in Glean: NikaTime's project IDs, names, and time-off entries all live in
+   one dropdown that changes over time. Resolve it fresh for the target
+   month:
+
+   ```bash
+   node scripts/nikatime.cjs projects --month 2026-08
+   ```
+
+   Entries with `timeOff: true` are the time-off labels (Vacation, Sick Day,
+   Day Off, etc.); the rest are workstream projects. Match each classified
+   label to a live `name` with an exact match. If a label has no exact match,
+   or more than one plausible candidate, stop and ask the user — do not
+   invent or guess a project ID, per the existing project-resolution rule
+   above.
+4. Turn the resolved mapping into a `batch` manifest for ordinary days and a
+   `replace` manifest for split or time-off days, then continue with the
+   normal workflow: preview both dry runs, verify them against the
+   classification, and apply only if the user authorizes it.
