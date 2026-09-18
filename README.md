@@ -12,8 +12,11 @@ operation to a dry run.
   (the only command that always opens a real Chrome window, since that is
   how it observes live network traffic).
 - List the exact project IDs available to the signed-in user.
+- Show exactly what is already recorded for one date or a whole month, with
+  project names resolved, before writing anything.
 - Fill one day or multiple missing weekdays.
-- Batch-fill dates from a JSON manifest.
+- Batch-fill dates from a JSON manifest (warns instead of silently no-oping
+  when a date is already full under a different project than requested).
 - Replace a date with multiple entries for split work and time-off days.
 - Verify exact dates, projects, hours, and notes after writes.
 - Restore and verify previous records if a destructive replacement fails.
@@ -70,6 +73,7 @@ See [SKILL.md](SKILL.md) for the complete agent workflow and safety rules.
 ```bash
 node scripts/nikatime.cjs inspect --month 2026-08
 node scripts/nikatime.cjs projects --month 2026-08
+node scripts/nikatime.cjs show --month 2026-08 --date 2026-08-26
 node scripts/nikatime.cjs batch --month 2026-08 --file /absolute/path/entries.json
 ```
 

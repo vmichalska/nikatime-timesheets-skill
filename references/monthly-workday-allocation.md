@@ -29,6 +29,13 @@ previous conversations.
 1. Enumerate weekdays in the target month. Exclude weekends unless the user
    asks for a full calendar view.
 2. Retrieve cross-app activity for the user and month with `user_activity`.
+   A single 5-weekday window commonly returns well over 150,000 characters
+   and will be saved to a file rather than returned inline. Read that file in
+   full — in sequential chunks if needed — before classifying anything; do
+   not classify from a partial read. This is expensive enough per horizon
+   that it is usually worth delegating the read-and-classify step to a
+   forked/background subagent per horizon (see SKILL.md's classification
+   workflow) rather than pulling the raw dump into the main conversation.
 3. Inspect merged or landed code first. Use `code_search` or GitHub activity
    to identify PRs authored by the user, merge status, merge/land date when
    available, and the work represented. Merged production code outranks
@@ -56,6 +63,18 @@ previous conversations.
 - Do not force a classification from silence. If a weekday has no
   attributable work evidence, mark it "No attributable activity" or ask
   whether the user wants those days included.
+- Some weekdays genuinely split between two unrelated, similarly-dominant
+  workstreams (e.g. two separate merged PRs in two different epics with no
+  clear precedence). When the evidence doesn't support picking one, propose
+  both candidate labels for that date and let the user choose or split it,
+  rather than forcing a single label — see the split-workstream format below.
+- The live label list often has several near-identical names across teams
+  (a `Tech Debt` and an `Other` label per team prefix is common). If the
+  strongest fit is ambiguous between team prefixes, or the user names a label
+  without a prefix (e.g. "Tech Debt"), do not guess across teams silently.
+  Prefer the team prefix already implicated by that day's evidence, state the
+  assumption explicitly in the proposed mapping, and ask if more than one
+  team is plausible.
 
 ## Time-off rules
 
@@ -92,6 +111,14 @@ For a partial absence:
 
 ```
 - **Aug 26:** SWARM: Placement Management — placement-warning work; Vacation in the afternoon. <cite>...</cite>
+```
+
+For a day genuinely split between two workstreams (not workstream + time-off),
+present both candidates on one bullet rather than silently picking one, so the
+user can choose a single label or confirm a split day:
+
+```
+- **Aug 28:** Split — CORE: USS Decomposition (dedicated session-response dual-consume rollout, merged) or SWARM: Tech Debt (paste-priority gating, merged); pick one or split the day's hours between both. <cite>...</cite>
 ```
 
 After the list, include a compact count by label and a short note for

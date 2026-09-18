@@ -80,10 +80,27 @@ imported session is valid.
    node scripts/nikatime.cjs projects --month 2026-08
    ```
 
-3. Prepare the intended operation and run it without `--apply`.
-4. Verify the dry-run output against the user's request.
-5. If submission is authorized, rerun the identical command with `--apply`.
-6. Report the verified records and any dates deliberately left unchanged.
+3. Before writing anything, check what is already on file for every date you
+   are about to touch:
+
+   ```bash
+   node scripts/nikatime.cjs show --month 2026-08 --date 2026-08-26
+   node scripts/nikatime.cjs show --month 2026-08
+   ```
+
+   Do this even for dates you expect to be empty. `batch` (see below) is
+   idempotent by total hours only — a date that already has its full target
+   hours entered under the *wrong* project is invisible to `batch` and will
+   be silently left wrong. `show` is the reliable way to see what a date
+   actually holds; do not rely on a `replace` dry run's `previous` field as a
+   substitute for checking first, and do not assume a date is empty just
+   because the user hasn't mentioned it.
+4. Prepare the intended operation and run it without `--apply`.
+5. Verify the dry-run output against the user's request. For `batch`, also
+   read any printed mismatch warning (see Operation modes below) — a date
+   listed there needs `replace`, not `batch`, or it will not change.
+6. If submission is authorized, rerun the identical command with `--apply`.
+7. Report the verified records and any dates deliberately left unchanged.
 
 ## Operation modes
 
@@ -119,10 +136,19 @@ node scripts/nikatime.cjs batch --month 2026-08 --file /absolute/path/entries.js
 node scripts/nikatime.cjs batch --month 2026-08 --file /absolute/path/entries.json --apply
 ```
 
-`batch` is idempotent by total daily hours: it adds only each date's remaining
-gap and rejects duplicate dates in one manifest. Use `replace` when correcting an
-existing day or splitting it among projects or time-off categories. A replacement
-manifest may contain multiple entries, but they must all use the same date:
+`batch` is idempotent by total daily hours only: it adds only each date's
+remaining gap and rejects duplicate dates in one manifest. It never checks
+*which* project the existing hours belong to. That means a date that already
+has a full day entered under a different project is a silent no-op for
+`batch` — the day stays mislabeled and nothing in `batch`'s own output says
+so unless you read the mismatch warning it prints for exactly this case (see
+`show`, above, for confirming this ahead of time). Use `replace` when
+correcting an existing day, relabeling a full day logged under the wrong
+project, or splitting a day among projects or time-off categories. A
+replacement manifest may contain multiple entries, but they must all use the
+same date — this also covers a day genuinely split between two or more
+*workstreams* (not only a workstream plus time-off): give each workstream its
+own entry with its own hours summing to the day's total.
 
 ```bash
 node scripts/nikatime.cjs replace --month 2026-08 --file /absolute/path/replacement.json
@@ -175,6 +201,15 @@ still operate through `--month` and, where supported, `--date`.
    `references/monthly-workday-allocation.md`, originally a Glean skill) —
    do not ask for permission before pulling Slack, GitHub, or Glean activity
    data.
+
+   A Glean `user_activity` call covering even a single 5-weekday window
+   routinely returns well over 150,000 characters, which overflows a normal
+   tool result and gets redirected to a file. Expect this rather than
+   discovering it mid-task: fetch the activity, then hand the saved file plus
+   the classification instructions to a forked/background subagent to read
+   in full and produce the day-by-day mapping, instead of trying to read and
+   reason over that volume inline. Do the same per distinct horizon (e.g. one
+   fork per week) rather than one giant fetch-and-read pass.
 3. Check whether the `glean_default` MCP server is connected in this session.
    - If connected, follow `references/monthly-workday-allocation.md`
      directly, using `mcp__glean_default__user_activity`,
@@ -194,7 +229,19 @@ still operate through `--month` and, where supported, `--date`.
 5. Present that mapping to the user as a proposed classification, one entry
    per date, and get explicit confirmation that the labels are correct before
    proceeding. Correct any label the user disputes and reconfirm.
+
+   The live label list frequently has several near-identical entries across
+   teams (e.g. a `Tech Debt` and an `Other` label per team prefix). If the
+   user corrects a label with a bare name that matches more than one live
+   entry (e.g. "make it Tech Debt" when `SWARM:`, `DI:`, `AT:`, `FIX:`, `PT:`,
+   `RFQ:`, `TA:`, `UI:`, `POST:`, and `DINT:` all have one), do not silently
+   pick one. Default to the same team prefix as the label already under
+   discussion for that date when that's a plausible read, but confirm the
+   exact live name with the user (for example via a short multiple-choice
+   question) rather than guessing across teams.
 6. Turn the confirmed mapping into a `batch` manifest for ordinary days and a
-   `replace` manifest for split or time-off days, then continue with the
-   normal workflow: preview both dry runs, verify them against the confirmed
-   classification, and apply only if the user authorizes the write.
+   `replace` manifest for split, time-off, or corrected days, then continue
+   with the normal workflow: run `show` on every date first to confirm what
+   is already there, preview both dry runs, verify them against the
+   confirmed classification, and apply only if the user authorizes the
+   write.

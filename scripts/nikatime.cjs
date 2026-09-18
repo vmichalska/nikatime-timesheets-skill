@@ -66,6 +66,7 @@ function usage() {
   console.log(`Usage:
   node nikatime.cjs inspect --month YYYY-MM
   node nikatime.cjs projects --month YYYY-MM
+  node nikatime.cjs show --month YYYY-MM [--date YYYY-MM-DD]
   node nikatime.cjs batch --month YYYY-MM --file ENTRIES.json [--apply]
   node nikatime.cjs replace --month YYYY-MM --file ENTRIES.json [--apply]
   node nikatime.cjs fill --month YYYY-MM --project-id PROJECT_ID [--date YYYY-MM-DD] [--hours 8] [--note TEXT] [--apply]
@@ -73,6 +74,10 @@ function usage() {
 Commands:
   inspect   Sign in if needed and summarize the month without writing anything.
   projects  List project IDs available to the month's entry form.
+  show      Print the records already on file for one date, or every date in
+            the month, with project names resolved. Read-only; never opens a
+            browser beyond normal session renewal. Run this before batch or
+            replace to see what is already there.
   batch     Fill dates from a JSON array. Dry-run unless --apply is present.
   replace   Preview or replace all records on the manifest's single date.
   fill      Calculate gaps for the month's weekdays. Dry-run unless --apply is present.
@@ -886,7 +891,7 @@ async function restoreDate(session, ensureWorkload, workload, date, backup) {
   }
 }
 
-async function directListProjects(cookieValue, userId) {
+async function fetchProjectList(cookieValue, userId) {
   const dropdown = await directDropdown(cookieValue, userId);
   if (
     dropdown.status < 200 ||
@@ -909,7 +914,95 @@ async function directListProjects(cookieValue, userId) {
       });
     }
   }
+  return projects;
+}
+
+async function directListProjects(cookieValue, userId) {
+  const projects = await fetchProjectList(cookieValue, userId);
   console.log(JSON.stringify(projects, null, 2));
+}
+
+function projectNameMap(projects) {
+  const map = new Map();
+  for (const project of projects) map.set(String(project.id), project.name);
+  return map;
+}
+
+// Existing records on a date, in the shape `batch`/`replace` warnings and
+// `show` both print: human-readable project names alongside the raw IDs, so
+// an agent can tell at a glance whether a "day already has 8 hours" actually
+// means the day is correctly labeled, or is filled under the wrong project.
+function describeExistingRecords(workload, nameMap, date) {
+  return (workload.records || [])
+    .filter((record) => !date || record.date === date)
+    .slice()
+    .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+    .map((record) => ({
+      date: record.date,
+      projectId: String(record.project_id),
+      projectName: nameMap.get(String(record.project_id)) || "(project no longer in dropdown)",
+      hours: Number(record.hours),
+      notes: record.info || "",
+    }));
+}
+
+async function runShow(session, workload, date) {
+  const projects = await fetchProjectList(session.cookie.value, workload.userId);
+  const nameMap = projectNameMap(projects);
+
+  if (date) {
+    const records = describeExistingRecords(workload, nameMap, date);
+    const totalHours = records.reduce((sum, record) => sum + record.hours, 0);
+    console.log(JSON.stringify({ date, totalHours, records }, null, 2));
+    return;
+  }
+
+  const { periodWeekdays } = summarize(workload);
+  const allRecords = describeExistingRecords(workload, nameMap);
+  const recordsByDate = new Map();
+  for (const record of allRecords) {
+    if (!recordsByDate.has(record.date)) recordsByDate.set(record.date, []);
+    recordsByDate.get(record.date).push(record);
+  }
+  const days = periodWeekdays.map((weekday) => {
+    const records = recordsByDate.get(weekday) || [];
+    return {
+      date: weekday,
+      totalHours: records.reduce((sum, record) => sum + record.hours, 0),
+      records,
+    };
+  });
+  console.log(JSON.stringify({ month: PERIOD_LABEL, days }, null, 2));
+}
+
+// `batch` only ever fills the gap between a date's existing total hours and
+// the target; it never inspects *which* project those existing hours are
+// under. That makes it silently inert on a date that is already full but
+// mislabeled — the exact failure mode that motivated this warning: a day
+// logged under the wrong project stayed wrong until a `replace` dry run was
+// used as an ad hoc diagnostic to notice it. Surface that case loudly instead
+// of leaving it to be discovered by accident.
+function batchSkipWarnings(workload, entries, defaultHours, nameMap) {
+  const { hoursByDate } = summarize(workload);
+  const warnings = [];
+  entries.forEach((rawEntry, index) => {
+    const entry = validateEntry(rawEntry, index, { requireHours: false, defaultHours });
+    const existingHours = hoursByDate.get(entry.date) || 0;
+    if (existingHours < entry.hours) return;
+    const existingRecords = describeExistingRecords(workload, nameMap, entry.date);
+    const alreadyUnderRequestedProject = existingRecords.some(
+      (record) => record.projectId === entry.projectId,
+    );
+    if (alreadyUnderRequestedProject) return;
+    warnings.push({
+      date: entry.date,
+      requestedProjectId: entry.projectId,
+      requestedProjectName: nameMap.get(entry.projectId) || "(unknown project)",
+      existingHours,
+      existingRecords,
+    });
+  });
+  return warnings;
 }
 
 async function runInspect(args, preparedChromeCookie) {
@@ -976,6 +1069,11 @@ async function runDirectCommand(args, preparedChromeCookie) {
     return;
   }
 
+  if (args.command === "show") {
+    await runShow(session, workload, args.date);
+    return;
+  }
+
   async function submit(plan) {
     let result = await submitPlan(session.cookie.value, plan);
     if (isAuthFailure(result.status, result.body)) {
@@ -997,6 +1095,16 @@ async function runDirectCommand(args, preparedChromeCookie) {
   if (args.command === "batch") {
     const entries = JSON.parse(fs.readFileSync(path.resolve(args.file), "utf8"));
     if (!Array.isArray(entries)) throw new Error("Batch file must contain a JSON array");
+    const projects = await fetchProjectList(session.cookie.value, workload.userId);
+    const warnings = batchSkipWarnings(workload, entries, configuredTarget, projectNameMap(projects));
+    if (warnings.length > 0) {
+      console.warn(
+        "WARNING: batch fills hour gaps only and cannot relabel a date that is already full under a " +
+          "different project. The following dates already have their target hours entered under a " +
+          "different project and will be left untouched. Use `replace` for these dates instead:",
+      );
+      console.warn(JSON.stringify(warnings, null, 2));
+    }
     const plan = buildBatchPlan(workload, entries, configuredTarget);
     const expectedState = expectedAfterAdd(workload, plan);
     console.log(JSON.stringify({ dryRun: !args.apply, recordCount: plan.length, records: plan }, null, 2));
@@ -1156,7 +1264,7 @@ async function main() {
     usage();
     return;
   }
-  if (!["inspect", "projects", "batch", "replace", "fill"].includes(args.command)) {
+  if (!["inspect", "projects", "show", "batch", "replace", "fill"].includes(args.command)) {
     usage();
     throw new Error(`Unknown command: ${args.command}`);
   }
