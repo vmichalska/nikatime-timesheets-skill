@@ -1,23 +1,25 @@
 ---
 name: nikatime-timesheets
-description: Inspect, preview, create, batch-fill, and safely replace NikaTime web timesheet entries using browser-managed authentication. Use when the user asks to read or fill NikaTime dates, projects, hours, notes, vacation, or other time off; do not use for unrelated time trackers.
+description: Inspect, preview, create, batch-fill, and safely replace NikaTime web timesheet entries, using Vacation Tracker leave as time-off evidence. Use when the user asks to read or fill NikaTime dates, projects, hours, notes, vacation, or other time off; do not use for unrelated time trackers.
 ---
 
 # NikaTime Timesheets
 
-Use `scripts/nikatime.cjs` for deterministic NikaTime reads and writes. It talks
-to NikaTime's API directly over HTTPS using the `authCookie` decrypted straight
-out of Chrome's own storage; no browser is launched for `projects`, `batch`,
-`replace`, or `fill` unless that session cannot renew itself. `inspect` always
-drives a real Chrome window, since discovering the live API calls the web app
-makes requires watching real browser network traffic.
+Use `scripts/nikatime.cjs` for deterministic NikaTime reads and writes and for
+read-only Vacation Tracker leave lookup. It talks to both services directly
+over HTTPS using sessions recovered from Chrome's own storage; no browser is
+launched for `projects`, `show`, `vacations`, `batch`, `replace`, or `fill`
+unless a session cannot be renewed directly. `inspect` always drives a real
+Chrome window, since discovering the live NikaTime API calls the web app makes
+requires watching real browser network traffic.
 
 ## Safety and authorization
 
-- Never ask the user to paste or reveal `authCookie`, Slack credentials, or MFA.
-- Read operations (`inspect`, `projects`, and commands without `--apply`) are safe
-  preparation. Run a dry run before every mutation and show or check the exact
-  dates, project IDs, hours, and notes.
+- Never ask the user to paste or reveal `authCookie`, Vacation Tracker Cognito
+  tokens, Slack credentials, or MFA.
+- Read operations (`inspect`, `projects`, `show`, `vacations`, and commands
+  without `--apply`) are safe preparation. Run a dry run before every mutation
+  and show or check the exact dates, project IDs, hours, and notes.
 - Do not add `--apply` unless the user explicitly asked to submit those entries.
   A prior request to inspect, research, or prepare a script is not authorization.
 - Resolve material ambiguity before writing, especially partial-day hours and the
@@ -55,18 +57,31 @@ Set `NIKATIME_SKIP_CHROME_IMPORT=1` when the dedicated profile is already
 authenticated and another Keychain prompt is not needed.
 `NIKATIME_BROWSER_PROFILE` can select a shared profile location.
 
+For `vacations`, the script snapshots Chrome's local-storage LevelDB, reads only
+Vacation Tracker's Cognito session keys, and queries Vacation Tracker's
+first-party GraphQL endpoint directly. It never prints the ID or refresh token.
+An expired ID token is refreshed directly with Cognito, so a browser is not
+normally involved. Only when the stored session is missing or cannot refresh
+does it open a dedicated Chrome profile for interactive sign-in. Let the user
+complete credentials or MFA; do not automate those secrets. Set
+`VACATIONTRACKER_SKIP_BROWSER_FALLBACK=1` to fail instead of opening that login
+window, `VACATIONTRACKER_CHROME_LOCAL_STORAGE` to select another Chrome
+local-storage database, or `VACATIONTRACKER_BROWSER_PROFILE` to select the
+fallback profile.
+
 ## Workflow
 
 Run commands from the skill directory or use the absolute script path. Always
 pass an explicit `--month YYYY-MM`.
 
-The skill includes its Playwright runtime under `scripts/node_modules`, needed
-only for `inspect` and for interactive session renewal. If a copied
-installation does not include it, run `cd scripts &&
+The skill includes its runtime dependencies under `scripts/node_modules`.
+`classic-level` reads a snapshot of Chrome local storage without opening a
+browser; Playwright is needed only for `inspect` and interactive session
+renewal. If a copied installation does not include them, run `cd scripts &&
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev`; the script uses the
 installed Google Chrome browser rather than downloading one. `projects`,
-`batch`, `replace`, and `fill` do not need Playwright at all as long as the
-imported session is valid.
+`show`, `vacations`, `batch`, `replace`, and `fill` do not need Playwright at
+all as long as the imported sessions are valid.
 
 1. Inspect the month and validate the account and configured workday duration:
 
@@ -196,7 +211,30 @@ still operate through `--month` and, where supported, `--date`.
    Entries with `timeOff: true` are the available time-off labels; the rest
    are the available workstream projects. This live list is the only valid
    set of labels to classify into.
-2. Go straight into investigating the user's activity for that horizon (the
+2. Read the user's approved leave from Vacation Tracker for every calendar
+   month touched by the horizon:
+
+   ```bash
+   node scripts/nikatime.cjs vacations --month 2026-08
+   ```
+
+   This command reads the Leaves tab at
+   `https://app.vacationtracker.io/app/my-profile?activeTab=leaves` through its
+   first-party API and returns only approved requests overlapping the month.
+   Its `days` array is authoritative time-off evidence: each item includes the
+   date, Vacation Tracker leave type, exact leave hours, normal working hours,
+   and whether it is a full day. Match the returned `leaveType` to an exact live
+   NikaTime entry with `timeOff: true`; if there is no unambiguous exact match,
+   ask the user which live time-off label to use rather than guessing.
+
+   A full day is classified wholly as that time-off label. A partial day is a
+   split day: preserve the exact leave hours and investigate/classify only the
+   remaining work hours. If Vacation Tracker returns a leave date without exact
+   hours, treat the allocation as unresolved and ask the user before preparing
+   a manifest. Never infer that a quiet day was vacation when Vacation Tracker
+   has no approved leave record for it.
+3. Go straight into investigating the user's activity for the non-time-off
+   portion of that horizon (the
    evidence workflow, classification rules, and time-off rules in
    `references/monthly-workday-allocation.md`, originally a Glean skill) —
    do not ask for permission before pulling Slack, GitHub, or Glean activity
@@ -210,7 +248,7 @@ still operate through `--month` and, where supported, `--date`.
    in full and produce the day-by-day mapping, instead of trying to read and
    reason over that volume inline. Do the same per distinct horizon (e.g. one
    fork per week) rather than one giant fetch-and-read pass.
-3. Check whether the `glean_default` MCP server is connected in this session.
+4. Check whether the `glean_default` MCP server is connected in this session.
    - If connected, follow `references/monthly-workday-allocation.md`
      directly, using `mcp__glean_default__user_activity`,
      `mcp__glean_default__code_search`, and `mcp__glean_default__search` as
@@ -221,12 +259,14 @@ still operate through `--month` and, where supported, `--date`.
      integration the current client (Claude, Codex, or Cursor) has
      available, then apply the same evidence and citation rules against
      those sources.
-4. Classify each weekday in the horizon under the live labels pulled in step
-   1, with citations. Match each classification to a live `name` with an
-   exact match. If nothing in the live list fits, report the day as
-   Unclassified rather than inventing a label — do not guess or invent a
-   project ID or name. This produces a `date -> live label` mapping.
-5. Present that mapping to the user as a proposed classification, one entry
+5. Classify each weekday in the horizon under the live labels pulled in step
+   1, combining Vacation Tracker time-off evidence from step 2 with cited
+   activity evidence for the remaining hours. Match each classification to a
+   live `name` with an exact match. If nothing in the live list fits, report
+   the day or remaining hours as Unclassified rather than inventing a label —
+   do not guess or invent a project ID or name. This produces a `date -> live
+   label and hours` mapping.
+6. Present that mapping to the user as a proposed classification, one entry
    per date, and get explicit confirmation that the labels are correct before
    proceeding. Correct any label the user disputes and reconfirm.
 
@@ -239,7 +279,7 @@ still operate through `--month` and, where supported, `--date`.
    discussion for that date when that's a plausible read, but confirm the
    exact live name with the user (for example via a short multiple-choice
    question) rather than guessing across teams.
-6. Turn the confirmed mapping into a `batch` manifest for ordinary days and a
+7. Turn the confirmed mapping into a `batch` manifest for ordinary days and a
    `replace` manifest for split, time-off, or corrected days, then continue
    with the normal workflow: run `show` on every date first to confirm what
    is already there, preview both dry runs, verify them against the

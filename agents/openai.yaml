@@ -1,4 +1,4 @@
 interface:
   display_name: "NikaTime Timesheets"
-  short_description: "Safely inspect and fill NikaTime timesheets"
-  default_prompt: "Use $nikatime-timesheets to preview and fill my NikaTime entries."
+  short_description: "Fill NikaTime with activity and Vacation Tracker leave"
+  default_prompt: "Use $nikatime-timesheets to preview and fill my NikaTime entries, checking Vacation Tracker for time off."
