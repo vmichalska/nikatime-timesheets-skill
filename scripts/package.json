@@ -5,6 +5,7 @@
   "description": "Runtime dependency for the NikaTime timesheets skill",
   "license": "UNLICENSED",
   "dependencies": {
+    "classic-level": "^3.0.0",
     "playwright": "1.62.1"
   }
 }

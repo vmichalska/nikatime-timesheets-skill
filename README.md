@@ -4,7 +4,8 @@ An agent skill for safely inspecting and filling NikaTime web timesheets from
 Codex, Claude, or Cursor. It talks to NikaTime directly over HTTPS using a
 cookie decrypted straight from Chrome, only falling back to a real browser
 window when interactive login is actually needed, and defaults every write
-operation to a dry run.
+operation to a dry run. It also reads approved full-day and partial-day leave
+from Vacation Tracker so time-off dates are not inferred from missing activity.
 
 ## What it supports
 
@@ -14,6 +15,9 @@ operation to a dry run.
 - List the exact project IDs available to the signed-in user.
 - Show exactly what is already recorded for one date or a whole month, with
   project names resolved, before writing anything.
+- Read approved Vacation Tracker leave for a month, including exact partial-day
+  hours, through its first-party API without launching a browser in the normal
+  path.
 - Fill one day or multiple missing weekdays.
 - Batch-fill dates from a JSON manifest (warns instead of silently no-oping
   when a date is already full under a different project than requested).
@@ -29,6 +33,8 @@ operation to a dry run.
 - macOS with Google Chrome installed.
 - Node.js and npm.
 - A NikaTime account authenticated through Slack.
+- A Vacation Tracker account signed in through the default Chrome profile when
+  using the leave lookup.
 
 The script decrypts NikaTime's encrypted `authCookie` straight from Chrome and
 uses it directly over HTTPS for `projects`, `batch`, `replace`, and `fill` — no
@@ -36,6 +42,11 @@ browser involved as long as that session is valid. It never prints the cookie,
 Slack credentials, or MFA secrets. If the session is missing or expired, it
 opens a dedicated automation profile in a visible Chrome window, completes the
 Slack login flow, and continues with the freshly renewed cookie.
+
+For Vacation Tracker, the script snapshots Chrome's local-storage database,
+reads only its Cognito session keys, refreshes the token directly when needed,
+and calls Vacation Tracker over HTTPS. Playwright is used only as a last-resort
+interactive login fallback; tokens are never printed.
 
 ## Install
 
@@ -74,6 +85,7 @@ See [SKILL.md](SKILL.md) for the complete agent workflow and safety rules.
 node scripts/nikatime.cjs inspect --month 2026-08
 node scripts/nikatime.cjs projects --month 2026-08
 node scripts/nikatime.cjs show --month 2026-08 --date 2026-08-26
+node scripts/nikatime.cjs vacations --month 2026-08
 node scripts/nikatime.cjs batch --month 2026-08 --file /absolute/path/entries.json
 ```
 
@@ -82,6 +94,7 @@ output before applying it.
 
 ## Disclaimer
 
-This project automates NikaTime's web endpoints rather than a documented public
-API. Endpoint behavior may change. Review dry runs and post-write verification,
-especially after NikaTime web releases.
+This project automates NikaTime's web endpoints and reads Vacation Tracker's web
+GraphQL endpoint rather than relying on documented public APIs. Endpoint
+behavior may change. Review dry runs and post-write verification, especially
+after either service releases web-app changes.
