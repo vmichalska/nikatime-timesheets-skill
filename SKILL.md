@@ -7,11 +7,12 @@ description: Inspect, preview, create, batch-fill, and safely replace NikaTime w
 
 Use `scripts/nikatime.cjs` for deterministic NikaTime reads and writes and for
 read-only Vacation Tracker leave lookup. It talks to both services directly
-over HTTPS using sessions recovered from Chrome's own storage; no browser is
-launched for `projects`, `show`, `vacations`, `batch`, `replace`, or `fill`
-unless a session cannot be renewed directly. `inspect` always drives a real
-Chrome window, since discovering the live NikaTime API calls the web app makes
-requires watching real browser network traffic.
+over HTTPS using reusable local sessions. Routine NikaTime commands use a
+private owner-only credential cache and do not query Chrome Safe Storage, so
+they do not trigger a recurring macOS password prompt. A dedicated Chrome
+profile recovers or renews the session only when needed. `inspect` always drives
+a real Chrome window, since discovering the live NikaTime API calls the web app
+makes requires watching real browser network traffic.
 
 ## Safety and authorization
 
@@ -32,30 +33,39 @@ requires watching real browser network traffic.
 
 ## Authentication
 
-On macOS, the script decrypts NikaTime's encrypted cookie straight out of the
-default Chrome profile's own storage (Chrome Safe Storage, held in memory) and
-uses that value directly in the `Cookie` header of its own HTTPS requests. It
-does not print the key or plaintext cookie. A macOS Keychain prompt may require
-user approval.
+For `projects`, `show`, `batch`, `replace`, and `fill`, the script first reads
+NikaTime's `authCookie` from
+`~/.local/share/nikatime-timesheets/session.json` and uses it directly in the
+`Cookie` header of its own HTTPS requests. The cache is a local bearer
+credential analogous to a CLI `auth.json`: the script creates it atomically,
+enforces owner-only (`0600`) permissions, validates its shape and ownership,
+and never prints its value.
 
-For `projects`, `batch`, `replace`, and `fill`, this decrypted value is used
-immediately — no browser is opened at all as long as that session is valid.
-If it is missing or cannot renew itself, the script opens a dedicated, reusable
-Chrome profile in a visible window and starts NikaTime's Slack OAuth flow. Let
-the user complete credentials or MFA in that window; do not automate those
-secrets. Once login completes, the script reads the freshly issued cookie back
-out of that browser, closes it, and continues over plain HTTPS for the rest of
-the run.
+On a missing, expired, or server-rejected cache entry, the script launches its
+dedicated reusable Chrome profile headlessly, reads the already-authenticated
+NikaTime session, closes Chrome, saves the cookie back to the private cache, and
+continues over direct HTTPS. Only when that browser profile also needs a fresh
+session does it reopen visibly and start NikaTime's Slack OAuth flow. Let the
+user complete credentials or MFA in that window; do not automate those secrets.
 
-`inspect` always opens that dedicated profile in Chrome (headless by default,
+Routine commands must not import the default Chrome profile. `--import-chrome`
+or `NIKATIME_IMPORT_CHROME=1` is an explicit recovery path that decrypts the
+default profile's NikaTime cookie through Chrome Safe Storage and may trigger a
+macOS Keychain password prompt. Use it only when the user explicitly asks to
+import that profile. `NIKATIME_SKIP_CHROME_IMPORT=1` suppresses the environment-
+variable form for backward compatibility; the CLI flag remains explicit.
+
+Set `NIKATIME_DISABLE_SESSION_CACHE=1` to keep the cookie only in the dedicated
+browser profile; this avoids a plaintext credential cache but requires a short
+headless Chrome launch on each command. `NIKATIME_SESSION_CACHE` can select a
+different cache path, and `NIKATIME_BROWSER_PROFILE` can select a shared browser
+profile location.
+
+`inspect` always opens the dedicated profile in Chrome (headless by default,
 since discovering the API calls only requires watching network traffic, not a
-visible window) and falls back to a visible window the same way if its own
-session cannot renew automatically. Pass `--headed` to `inspect` to always show
-the window (for example, to watch a run or debug).
-
-Set `NIKATIME_SKIP_CHROME_IMPORT=1` when the dedicated profile is already
-authenticated and another Keychain prompt is not needed.
-`NIKATIME_BROWSER_PROFILE` can select a shared profile location.
+visible window), seeds it from the local cache when available, and updates the
+cache after success. Pass `--headed` to `inspect` to always show the window (for
+example, to watch a run or debug).
 
 For `vacations`, the script snapshots Chrome's local-storage LevelDB, reads only
 Vacation Tracker's Cognito session keys, and queries Vacation Tracker's
@@ -76,12 +86,12 @@ pass an explicit `--month YYYY-MM`.
 
 The skill includes its runtime dependencies under `scripts/node_modules`.
 `classic-level` reads a snapshot of Chrome local storage without opening a
-browser; Playwright is needed only for `inspect` and interactive session
-renewal. If a copied installation does not include them, run `cd scripts &&
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev`; the script uses the
-installed Google Chrome browser rather than downloading one. `projects`,
-`show`, `vacations`, `batch`, `replace`, and `fill` do not need Playwright at
-all as long as the imported sessions are valid.
+browser; Playwright is needed for `inspect`, a NikaTime session-cache miss, and
+interactive session renewal. If a copied installation does not include them,
+run `cd scripts && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev`;
+the script uses the installed Google Chrome browser rather than downloading one.
+`projects`, `show`, `vacations`, `batch`, `replace`, and `fill` do not launch a
+browser as long as their reusable direct-HTTPS session is valid.
 
 1. Inspect the month and validate the account and configured workday duration:
 

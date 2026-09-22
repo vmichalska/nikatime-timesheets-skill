@@ -3,12 +3,12 @@
 /*
  * NikaTime timesheet helper.
  *
- * - Decrypts NikaTime's HttpOnly authCookie straight from Chrome's own
- *   storage and talks to the API directly (no browser) whenever that
- *   session is valid.
- * - Falls back to a dedicated Chrome profile only to complete interactive
- *   Slack OAuth/MFA when the session cannot renew on its own, then hands the
- *   freshly minted cookie back to the direct HTTP path.
+ * - Reuses NikaTime's HttpOnly authCookie from a private local session cache
+ *   and talks to the API directly (no browser) whenever that session is valid.
+ * - Recovers or renews the session through a dedicated Chrome profile, then
+ *   persists the refreshed cookie with owner-only permissions for later runs.
+ * - Imports the default Chrome profile only when explicitly requested, since
+ *   decrypting that profile can trigger a macOS Keychain password prompt.
  * - `inspect` always drives a real browser: its purpose is discovering the
  *   actual API calls the Overview page makes, which requires watching real
  *   network traffic.
@@ -76,9 +76,19 @@ const VACATION_TRACKER_PROFILE_URL =
   `${VACATION_TRACKER_ORIGIN}/app/my-profile?activeTab=leaves`;
 const VACATION_TRACKER_GRAPHQL_URL =
   "https://graphql.app.vacationtracker.io/graphql";
+const NIKATIME_STATE_DIR = path.join(
+  os.homedir(),
+  ".local",
+  "share",
+  "nikatime-timesheets",
+);
 const PROFILE_DIR =
   process.env.NIKATIME_BROWSER_PROFILE ||
-  path.join(os.homedir(), ".local", "share", "nikatime-timesheets", "chrome-profile");
+  path.join(NIKATIME_STATE_DIR, "chrome-profile");
+const SESSION_CACHE_PATH =
+  process.env.NIKATIME_SESSION_CACHE ||
+  path.join(NIKATIME_STATE_DIR, "session.json");
+const SESSION_CACHE_VERSION = 1;
 const VACATION_TRACKER_PROFILE_DIR =
   process.env.VACATIONTRACKER_BROWSER_PROFILE ||
   path.join(
@@ -144,14 +154,17 @@ Options:
   --apply          Submit the planned records, then reload and verify.
   --headed         For inspect only: force a visible Chrome window even if
                    the session looks valid.
+  --import-chrome  Explicitly import NikaTime's session from the default Chrome
+                   profile. This can trigger a macOS Keychain password prompt.
 
-projects, batch, replace, and fill talk to NikaTime directly over HTTPS using
-the authCookie decrypted from Chrome; no browser is launched unless that
-session cannot renew on its own, in which case a visible Chrome window opens
-just long enough to complete Slack login, then closes. inspect always opens a
-real Chrome window (headless by default, visible if renewal is needed or
---headed is passed), since discovering the live API calls requires watching
-real browser network traffic.
+projects, show, batch, replace, and fill talk to NikaTime directly over HTTPS
+using an authCookie kept in a private owner-only session cache. On a cache miss,
+a dedicated reusable Chrome profile recovers the session headlessly; a visible
+window opens only if Slack login is required. Importing the default Chrome
+profile is opt-in because its Safe Storage key can prompt for the macOS
+password. inspect always opens the dedicated Chrome profile (headless by
+default, visible if renewal is needed or --headed is passed), since discovering
+the live API calls requires watching real browser network traffic.
 
 vacations reads Vacation Tracker's Cognito session from a snapshot of Chrome's
 local storage, refreshes it directly when needed, and queries the first-party
@@ -166,6 +179,7 @@ function parseArgs(argv) {
     command: argv[0] || "inspect",
     apply: false,
     headed: false,
+    importChrome: false,
     projectId: undefined,
     month: undefined,
     file: undefined,
@@ -178,6 +192,7 @@ function parseArgs(argv) {
     const arg = argv[index];
     if (arg === "--apply") result.apply = true;
     else if (arg === "--headed") result.headed = true;
+    else if (arg === "--import-chrome") result.importChrome = true;
     else if (arg === "--project-id") result.projectId = argv[++index];
     else if (arg === "--month") result.month = argv[++index];
     else if (arg === "--file") result.file = argv[++index];
@@ -948,8 +963,125 @@ function decryptChromeCookie(record) {
   return plaintext.toString("utf8");
 }
 
+function normalizeNikaTimeCookie(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    throw new Error("Session cache does not contain a cookie object");
+  }
+  const domain = String(candidate.domain || "").replace(/^\./, "");
+  if (
+    candidate.name !== "authCookie" ||
+    domain !== "app.nikatime.com" ||
+    typeof candidate.value !== "string" ||
+    candidate.value.length === 0 ||
+    candidate.secure !== true ||
+    candidate.httpOnly !== true
+  ) {
+    throw new Error("Session cache contains an invalid NikaTime cookie");
+  }
+
+  const cookie = {
+    name: "authCookie",
+    value: candidate.value,
+    domain: candidate.domain,
+    path: candidate.path || "/",
+    secure: true,
+    httpOnly: true,
+  };
+  if (Number.isFinite(candidate.expires) && candidate.expires > 0) {
+    cookie.expires = candidate.expires;
+  }
+  if (["None", "Lax", "Strict"].includes(candidate.sameSite)) {
+    cookie.sameSite = candidate.sameSite;
+  }
+  return cookie;
+}
+
+function sessionCacheEnabled() {
+  return process.env.NIKATIME_DISABLE_SESSION_CACHE !== "1";
+}
+
+function readCachedSessionCookie(cachePath = SESSION_CACHE_PATH) {
+  if (!sessionCacheEnabled()) return null;
+
+  let fd;
+  try {
+    const noFollow = fs.constants.O_NOFOLLOW || 0;
+    fd = fs.openSync(cachePath, fs.constants.O_RDONLY | noFollow);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error("Session cache is not a regular file");
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error("Session cache is not owned by the current user");
+    }
+    if ((stat.mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600);
+
+    const payload = JSON.parse(fs.readFileSync(fd, "utf8"));
+    if (payload.version !== SESSION_CACHE_VERSION) {
+      throw new Error(`Unsupported session cache version: ${payload.version}`);
+    }
+    const cookie = normalizeNikaTimeCookie(payload.cookie);
+    if (cookie.expires && cookie.expires <= Date.now() / 1000) return null;
+    return cookie;
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Ignoring the local NikaTime session cache: ${error.message}`);
+    }
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function writeCachedSessionCookie(candidate, cachePath = SESSION_CACHE_PATH) {
+  if (!sessionCacheEnabled()) return;
+
+  const cookie = normalizeNikaTimeCookie(candidate);
+  const cacheDirectory = path.dirname(cachePath);
+  fs.mkdirSync(cacheDirectory, { recursive: true, mode: 0o700 });
+  const temporaryPath = path.join(
+    cacheDirectory,
+    `.${path.basename(cachePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+  );
+  const payload = `${JSON.stringify({
+    version: SESSION_CACHE_VERSION,
+    updatedAt: new Date().toISOString(),
+    cookie,
+  }, null, 2)}\n`;
+
+  let fd;
+  try {
+    fd = fs.openSync(
+      temporaryPath,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY,
+      0o600,
+    );
+    fs.writeFileSync(fd, payload, "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(temporaryPath, cachePath);
+    fs.chmodSync(cachePath, 0o600);
+  } catch (error) {
+    if (fd !== undefined) fs.closeSync(fd);
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== "ENOENT") throw cleanupError;
+    }
+    throw new Error(`Could not persist the NikaTime session cache: ${error.message}`);
+  }
+}
+
+function persistSessionCookie(candidate) {
+  try {
+    writeCachedSessionCookie(candidate);
+    return true;
+  } catch (error) {
+    console.warn(error.message);
+    return false;
+  }
+}
+
 function prepareExistingChromeCookie() {
-  if (process.env.NIKATIME_SKIP_CHROME_IMPORT === "1") return null;
   try {
     const record = readChromeCookieRecord();
     if (!record) return null;
@@ -970,18 +1102,34 @@ function prepareExistingChromeCookie() {
     if (record.sameSite === 0) cookie.sameSite = "None";
     else if (record.sameSite === 1) cookie.sameSite = "Lax";
     else if (record.sameSite === 2) cookie.sameSite = "Strict";
-    return cookie;
+    return normalizeNikaTimeCookie(cookie);
   } catch (error) {
     console.warn(`Could not read Chrome's NikaTime session: ${error.message}`);
     return null;
   }
 }
 
-async function importExistingChromeSession(context, preparedCookie) {
-  const cookie = preparedCookie || prepareExistingChromeCookie();
+function prepareInitialSession(args) {
+  const importRequested =
+    args.importChrome ||
+    (
+      process.env.NIKATIME_IMPORT_CHROME === "1" &&
+      process.env.NIKATIME_SKIP_CHROME_IMPORT !== "1"
+    );
+  if (importRequested) {
+    const cookie = prepareExistingChromeCookie();
+    if (cookie) return { cookie, source: "default-chrome" };
+    console.warn("No reusable NikaTime session was imported from the default Chrome profile.");
+  }
+
+  const cookie = readCachedSessionCookie();
+  return { cookie, source: cookie ? "session-cache" : null };
+}
+
+async function seedBrowserSession(context, cookie) {
   if (!cookie) return false;
   await context.addCookies([cookie]);
-  console.log("Imported the existing Chrome NikaTime session (cookie value hidden).");
+  console.log("Seeded the dedicated browser with a reusable NikaTime session (value hidden).");
   return true;
 }
 
@@ -1044,12 +1192,17 @@ async function loadWorkload(page, context) {
   return result.body.result;
 }
 
-async function printCookieMetadata(context) {
+async function readContextAuthCookie(context) {
   const cookies = await context.cookies("https://app.nikatime.com");
-  const cookie = cookies.find((item) => item.name === "authCookie");
+  const candidate = cookies.find((item) => item.name === "authCookie");
+  return candidate ? normalizeNikaTimeCookie(candidate) : null;
+}
+
+async function printCookieMetadata(context) {
+  const cookie = await readContextAuthCookie(context);
   if (!cookie) {
     console.log("authCookie: not present");
-    return;
+    return null;
   }
 
   console.log("authCookie:", {
@@ -1062,6 +1215,7 @@ async function printCookieMetadata(context) {
         ? new Date(cookie.expires * 1000).toISOString()
         : "browser session",
   });
+  return cookie;
 }
 
 function printDirectCookieMetadata(session) {
@@ -1071,6 +1225,7 @@ function printDirectCookieMetadata(session) {
     return;
   }
   console.log("authCookie:", {
+    source: session.source,
     domain: cookie.domain,
     path: cookie.path,
     secure: cookie.secure,
@@ -1171,9 +1326,8 @@ function buildBatchPlan(workload, entries, defaultHours) {
 // Every read/write NikaTime's own frontend makes goes through same-origin
 // fetch() calls that carry only the authCookie for authentication (no CSRF
 // token, no Origin/Referer check observed). These mirror those calls
-// exactly, using a cookie value obtained either by decrypting it straight
-// out of Chrome, or from an interactive renewal (see establishBrowserSession
-// / renewCookieViaBrowser below).
+// exactly, using a cookie value from the private session cache, the dedicated
+// browser profile, or an explicit default-Chrome import.
 
 async function apiFetch(pathname, { method = "GET", body, cookieValue } = {}) {
   const headers = { Cookie: `authCookie=${cookieValue}` };
@@ -1278,9 +1432,9 @@ function expectedAfterAdd(workload, plan) {
   return { dates, records: [...baseline, ...plan] };
 }
 
-// --- Browser fallback (only for `inspect`, and for interactive renewal) --
+// --- Browser fallback (for `inspect`, cache recovery, and interactive renewal) --
 
-async function establishBrowserSession(preparedChromeCookie, { forceHeaded = false } = {}) {
+async function establishBrowserSession(seedCookie, { forceHeaded = false } = {}) {
   const { chromium } = loadPlaywright();
   fs.mkdirSync(PROFILE_DIR, { recursive: true, mode: 0o700 });
 
@@ -1308,8 +1462,8 @@ async function establishBrowserSession(preparedChromeCookie, { forceHeaded = fal
   let headless = !forceHeaded;
   let context = await launchContext(headless);
   let page = context.pages()[0] || (await context.newPage());
-  if (preparedChromeCookie) {
-    await importExistingChromeSession(context, preparedChromeCookie);
+  if (seedCookie) {
+    await seedBrowserSession(context, seedCookie);
   }
 
   let workload;
@@ -1321,15 +1475,12 @@ async function establishBrowserSession(preparedChromeCookie, { forceHeaded = fal
       isAuthFailure(probe.status, probe.body);
     if (needsInteractiveLogin) {
       console.log(
-        "The imported session could not renew automatically; opening a visible Chrome window to finish Slack login.",
+        "The reusable NikaTime session could not authenticate; opening a visible Chrome window to finish Slack login.",
       );
       await context.close();
       headless = false;
       context = await launchContext(headless);
       page = context.pages()[0] || (await context.newPage());
-      if (preparedChromeCookie) {
-        await importExistingChromeSession(context, preparedChromeCookie);
-      }
       workload = await loadWorkload(page, context);
     } else if (
       probe.status < 200 ||
@@ -1348,14 +1499,14 @@ async function establishBrowserSession(preparedChromeCookie, { forceHeaded = fal
   return { context, page, apiCalls, workload };
 }
 
-async function renewCookieViaBrowser(preparedChromeCookie) {
-  const { context } = await establishBrowserSession(preparedChromeCookie);
+async function renewCookieViaBrowser() {
+  const { context } = await establishBrowserSession(null);
   try {
-    const cookies = await context.cookies("https://app.nikatime.com");
-    const cookie = cookies.find((item) => item.name === "authCookie");
+    const cookie = await readContextAuthCookie(context);
     if (!cookie) {
       throw new Error("Session established in Chrome but no authCookie was set; cannot continue.");
     }
+    persistSessionCookie(cookie);
     return cookie;
   } finally {
     await context.close();
@@ -1527,12 +1678,18 @@ function batchSkipWarnings(workload, entries, defaultHours, nameMap) {
   return warnings;
 }
 
-async function runInspect(args, preparedChromeCookie) {
-  const { context, apiCalls, workload } = await establishBrowserSession(preparedChromeCookie, {
+async function runInspect(args, initialSession) {
+  let seedCookie = initialSession.cookie;
+  if (seedCookie) {
+    const probe = await directWorkloadOnce(seedCookie.value);
+    if (!isValidWorkloadResult(probe)) seedCookie = null;
+  }
+  const { context, apiCalls, workload } = await establishBrowserSession(seedCookie, {
     forceHeaded: args.headed,
   });
   try {
-    await printCookieMetadata(context);
+    const cookie = await printCookieMetadata(context);
+    if (cookie) persistSessionCookie(cookie);
 
     const summary = summarize(workload);
     const configuredTarget = Number(workload.workdayDuration || 8);
@@ -1553,15 +1710,27 @@ async function runInspect(args, preparedChromeCookie) {
   }
 }
 
-async function runDirectCommand(args, preparedChromeCookie) {
-  const session = { cookie: preparedChromeCookie || null };
+async function runDirectCommand(args, initialSession) {
+  const session = {
+    cookie: initialSession.cookie || null,
+    source: initialSession.source,
+  };
+
+  async function renewSession() {
+    session.cookie = await renewCookieViaBrowser();
+    session.source = "browser-profile";
+    return session.cookie;
+  }
 
   async function ensureWorkload() {
     if (session.cookie) {
       const probe = await directWorkloadOnce(session.cookie.value);
-      if (isValidWorkloadResult(probe)) return probe.body.result;
+      if (isValidWorkloadResult(probe)) {
+        if (session.source === "default-chrome") persistSessionCookie(session.cookie);
+        return probe.body.result;
+      }
     }
-    session.cookie = await renewCookieViaBrowser(preparedChromeCookie);
+    await renewSession();
     const result = await directWorkloadOnce(session.cookie.value);
     if (!isValidWorkloadResult(result)) {
       throw new Error(
@@ -1599,7 +1768,7 @@ async function runDirectCommand(args, preparedChromeCookie) {
   async function submit(plan) {
     let result = await submitPlan(session.cookie.value, plan);
     if (isAuthFailure(result.status, result.body)) {
-      session.cookie = await renewCookieViaBrowser(preparedChromeCookie);
+      await renewSession();
       result = await submitPlan(session.cookie.value, plan);
     }
     return result;
@@ -1608,7 +1777,7 @@ async function runDirectCommand(args, preparedChromeCookie) {
   async function del(dates, targetUser) {
     let result = await deleteDates(session.cookie.value, dates, targetUser);
     if (isAuthFailure(result.status, result.body)) {
-      session.cookie = await renewCookieViaBrowser(preparedChromeCookie);
+      await renewSession();
       result = await deleteDates(session.cookie.value, dates, targetUser);
     }
     return result;
@@ -1732,7 +1901,7 @@ async function runDirectCommand(args, preparedChromeCookie) {
   const submission = await submitPlan(session.cookie.value, plan);
   if (isAuthFailure(submission.status, submission.body)) {
     console.log("Session expired before submission; renewing and rebuilding the plan.");
-    session.cookie = await renewCookieViaBrowser(preparedChromeCookie);
+    await renewSession();
     const refreshed = await ensureWorkload();
     const refreshedPlan = buildPlan(
       refreshed,
@@ -1821,19 +1990,31 @@ async function main() {
     validateNotes(args.note, "fill");
   }
 
-  // Read/decrypt before doing anything else so a macOS Keychain prompt cannot
-  // be hidden behind an automation browser window that may never open.
-  const preparedChromeCookie = prepareExistingChromeCookie();
+  // Routine commands never query Chrome Safe Storage. They use the private
+  // session cache first and recover through the dedicated browser profile on a
+  // miss. Importing the default Chrome profile is an explicit opt-in because
+  // macOS can require the user's password for that Keychain access.
+  const initialSession = prepareInitialSession(args);
 
   if (args.command === "inspect") {
-    await runInspect(args, preparedChromeCookie);
+    await runInspect(args, initialSession);
     return;
   }
 
-  await runDirectCommand(args, preparedChromeCookie);
+  await runDirectCommand(args, initialSession);
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  main,
+  normalizeNikaTimeCookie,
+  parseArgs,
+  readCachedSessionCookie,
+  writeCachedSessionCookie,
+};

@@ -2,10 +2,11 @@
 
 An agent skill for safely inspecting and filling NikaTime web timesheets from
 Codex, Claude, or Cursor. It talks to NikaTime directly over HTTPS using a
-cookie decrypted straight from Chrome, only falling back to a real browser
-window when interactive login is actually needed, and defaults every write
-operation to a dry run. It also reads approved full-day and partial-day leave
-from Vacation Tracker so time-off dates are not inferred from missing activity.
+private local session cache, recovers that session from a dedicated Chrome
+profile without querying macOS Keychain, and opens a visible browser only when
+interactive login is actually needed. Every write operation defaults to a dry
+run. It also reads approved full-day and partial-day leave from Vacation Tracker
+so time-off dates are not inferred from missing activity.
 
 ## What it supports
 
@@ -36,12 +37,21 @@ from Vacation Tracker so time-off dates are not inferred from missing activity.
 - A Vacation Tracker account signed in through the default Chrome profile when
   using the leave lookup.
 
-The script decrypts NikaTime's encrypted `authCookie` straight from Chrome and
-uses it directly over HTTPS for `projects`, `batch`, `replace`, and `fill` — no
-browser involved as long as that session is valid. It never prints the cookie,
-Slack credentials, or MFA secrets. If the session is missing or expired, it
-opens a dedicated automation profile in a visible Chrome window, completes the
-Slack login flow, and continues with the freshly renewed cookie.
+The script uses NikaTime's `authCookie` directly over HTTPS for `projects`,
+`show`, `batch`, `replace`, and `fill`. Like a CLI credential file, the cookie
+is cached locally in `~/.local/share/nikatime-timesheets/session.json` with
+owner-only (`0600`) permissions and is never printed. On a cache miss, a
+dedicated reusable Chrome profile recovers the session headlessly and updates
+the cache. If that profile also needs authentication, it opens visibly for
+Slack login and then continues over direct HTTPS.
+
+Normal commands never query Chrome Safe Storage, so they do not trigger the
+recurring macOS password prompt. `--import-chrome` (or
+`NIKATIME_IMPORT_CHROME=1`) explicitly imports the session from the default
+Chrome profile and may prompt for the macOS password; it is a recovery option,
+not the default. Set `NIKATIME_DISABLE_SESSION_CACHE=1` to keep the cookie only
+in the dedicated browser profile, at the cost of a short headless browser launch
+on each command. `NIKATIME_SESSION_CACHE` can select another cache path.
 
 For Vacation Tracker, the script snapshots Chrome's local-storage database,
 reads only its Cognito session keys, refreshes the token directly when needed,
