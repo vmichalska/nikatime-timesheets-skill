@@ -1,5 +1,7 @@
 # NikaTime Timesheets Skill
 
+[![Tests](https://github.com/vmichalska/nikatime-timesheets-skill/actions/workflows/tests.yml/badge.svg)](https://github.com/vmichalska/nikatime-timesheets-skill/actions/workflows/tests.yml)
+
 An agent skill for safely inspecting and filling NikaTime web timesheets from
 Codex, Claude, or Cursor. It talks to NikaTime directly over HTTPS using a
 private local session cache, recovers that session from a dedicated Chrome
@@ -104,6 +106,20 @@ node scripts/nikatime.cjs batch --month 2026-08 --file /absolute/path/entries.js
 
 Commands are read-only unless `--apply` is supplied. Always inspect the dry-run
 output before applying it.
+
+## Development
+
+`scripts/nikatime.cjs` is a thin CLI entrypoint. The implementation is grouped
+by responsibility under `scripts/lib/`: argument handling, period/date helpers,
+NikaTime API access, session management, planning, command workflows, and the
+Vacation Tracker integration each live in their own module.
+
+Run the deterministic test suite without contacting either service:
+
+```bash
+cd scripts
+npm test
+```
 
 ## Disclaimer
 

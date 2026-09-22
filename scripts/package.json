@@ -5,7 +5,7 @@
   "description": "Runtime dependency for the NikaTime timesheets skill",
   "license": "UNLICENSED",
   "scripts": {
-    "test": "node --test nikatime.test.cjs"
+    "test": "node --test test/*.test.cjs"
   },
   "dependencies": {
     "classic-level": "^3.0.0",

@@ -4,14 +4,11 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-delete process.env.NIKATIME_DISABLE_SESSION_CACHE;
-
 const {
   normalizeNikaTimeCookie,
-  parseArgs,
   readCachedSessionCookie,
   writeCachedSessionCookie,
-} = require("./nikatime.cjs");
+} = require("../lib/nikatime-session.cjs");
 
 function validCookie(overrides = {}) {
   return {
@@ -28,7 +25,9 @@ function validCookie(overrides = {}) {
 }
 
 function withTemporaryCache(run) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nikatime-cache-test-"));
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "nikatime-cache-test-"),
+  );
   const cachePath = path.join(directory, "session.json");
   try {
     run(cachePath);
@@ -37,12 +36,12 @@ function withTemporaryCache(run) {
   }
 }
 
-test("default Chrome import is explicit", () => {
-  assert.equal(parseArgs(["show", "--month", "2026-09"]).importChrome, false);
-  assert.equal(
-    parseArgs(["show", "--month", "2026-09", "--import-chrome"]).importChrome,
-    true,
-  );
+test.beforeEach(() => {
+  delete process.env.NIKATIME_DISABLE_SESSION_CACHE;
+});
+
+test.afterEach(() => {
+  delete process.env.NIKATIME_DISABLE_SESSION_CACHE;
 });
 
 test("session cache round-trips with owner-only permissions", () => {
@@ -75,17 +74,14 @@ test("expired cached sessions are ignored", () => {
 test("session caching can be disabled without touching the cache path", () => {
   withTemporaryCache((cachePath) => {
     process.env.NIKATIME_DISABLE_SESSION_CACHE = "1";
-    try {
-      writeCachedSessionCookie(validCookie(), cachePath);
-      assert.equal(fs.existsSync(cachePath), false);
-      assert.equal(readCachedSessionCookie(cachePath), null);
-    } finally {
-      delete process.env.NIKATIME_DISABLE_SESSION_CACHE;
-    }
+    writeCachedSessionCookie(validCookie(), cachePath);
+
+    assert.equal(fs.existsSync(cachePath), false);
+    assert.equal(readCachedSessionCookie(cachePath), null);
   });
 });
 
-test("cache validation rejects the wrong domain or weakened cookie flags", () => {
+test("cache validation rejects the wrong domain or weakened flags", () => {
   assert.throws(
     () => normalizeNikaTimeCookie(validCookie({ domain: "example.com" })),
     /invalid NikaTime cookie/,
@@ -94,4 +90,25 @@ test("cache validation rejects the wrong domain or weakened cookie flags", () =>
     () => normalizeNikaTimeCookie(validCookie({ httpOnly: false })),
     /invalid NikaTime cookie/,
   );
+  assert.throws(
+    () => normalizeNikaTimeCookie(validCookie({ secure: false })),
+    /invalid NikaTime cookie/,
+  );
+});
+
+test("malformed cache data is ignored without exposing its contents", () => {
+  withTemporaryCache((cachePath) => {
+    fs.writeFileSync(cachePath, "not-json", { mode: 0o600 });
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (message) => warnings.push(message);
+    try {
+      assert.equal(readCachedSessionCookie(cachePath), null);
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /Ignoring the local NikaTime session cache/);
+    assert.doesNotMatch(warnings[0], /test-session-value/);
+  });
 });
