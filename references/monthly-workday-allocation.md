@@ -125,6 +125,14 @@ After the list, include a compact count by label and a short note for
 excluded weekends, unclassified days, or evidence limitations. Do not include
 any label absent from the live label list in the allocation.
 
+This detailed, cited output is only for reviewing and confirming the proposed
+classification. Do not copy its evidence details into NikaTime entry notes.
+Automatically generated `fill`, `batch`, and `replace` operations must leave
+notes blank: no PR numbers or titles, Jira keys or ticket titles, commits,
+branches, URLs, citations, Slack excerpts, document names, or other artifact
+identifiers. Only use note text when the user explicitly provides it, and do
+not enrich that text with discovered evidence.
+
 ## Quality checks
 
 Before responding, verify:
@@ -138,3 +146,5 @@ Before responding, verify:
 - A mistaken classification is corrected rather than defended when the user
   provides new information.
 - Every factual source-derived claim has a nearby citation.
+- Generated NikaTime notes are blank unless the user explicitly supplied them;
+  classification evidence appears only in the review response.

@@ -28,6 +28,9 @@ so time-off dates are not inferred from missing activity.
 - Optionally classify a month's weekdays from activity evidence (Glean,
   Slack, GitHub) when the user hasn't specified days or projects, always with
   confirmation first. See `references/monthly-workday-allocation.md`.
+- Keep automatically generated NikaTime notes blank; PRs, Jira tickets,
+  commits, links, and other evidence stay in the review output rather than the
+  submitted timesheet.
 
 ## Requirements
 

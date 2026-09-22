@@ -127,6 +127,20 @@ browser as long as their reusable direct-HTTPS session is valid.
 6. If submission is authorized, rerun the identical command with `--apply`.
 7. Report the verified records and any dates deliberately left unchanged.
 
+## Notes policy
+
+For entries derived from activity classification, leave NikaTime `notes` blank.
+Evidence used to choose a label belongs only in the proposed mapping shown to
+the user; never copy that evidence into a `fill`, `batch`, or `replace` payload.
+In particular, generated notes must not contain PR numbers or titles, Jira keys
+or ticket titles, commit or branch names, URLs, citations, Slack excerpts,
+document names, or other artifact identifiers.
+
+If the user explicitly supplies note text, preserve that text without enriching
+it with discovered evidence. Otherwise omit `--note` for `fill` and use
+`"notes": ""` in manifests. This policy applies equally to workstream and
+time-off entries.
+
 ## Operation modes
 
 Fill one date or all missing weekdays with one project:
@@ -136,8 +150,7 @@ node scripts/nikatime.cjs fill \
   --month 2026-08 \
   --date 2026-08-26 \
   --project-id PROJECT_ID \
-  --hours 8 \
-  --note "Work description"
+  --hours 8
 ```
 
 For multiple dates, create a JSON array. `hours` is optional and defaults to the
@@ -149,7 +162,7 @@ account's workday duration:
     "date": "2026-08-03",
     "projectId": "PROJECT_ID",
     "hours": 8,
-    "notes": "Work description"
+    "notes": ""
   }
 ]
 ```
@@ -294,4 +307,6 @@ still operate through `--month` and, where supported, `--date`.
    with the normal workflow: run `show` on every date first to confirm what
    is already there, preview both dry runs, verify them against the
    confirmed classification, and apply only if the user authorizes the
-   write.
+   write. Follow the Notes policy above: keep automatically generated notes
+   blank, even when the evidence used to classify the day contains specific
+   PRs, Jira tickets, commits, messages, documents, or other artifacts.
