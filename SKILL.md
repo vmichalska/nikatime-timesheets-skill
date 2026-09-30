@@ -93,6 +93,14 @@ the script uses the installed Google Chrome browser rather than downloading one.
 `projects`, `show`, `vacations`, `batch`, `replace`, and `fill` do not launch a
 browser as long as their reusable direct-HTTPS session is valid.
 
+Git-cloned installations participate in automatic skill updates by default.
+Before each CLI command, the bootstrap fast-forwards a clean checkout from its
+configured upstream and restarts into the new version. It skips nested or
+locally modified checkouts, continues on the installed version when the remote
+is unavailable, and refreshes npm dependencies when the lockfile changes. Set
+`NIKATIME_AUTO_UPDATE=0` (also accepts `false`, `no`, or `off`) to opt out.
+Copied installations that are not standalone Git checkouts are left unchanged.
+
 1. Inspect the month and validate the account and configured workday duration:
 
    ```bash
