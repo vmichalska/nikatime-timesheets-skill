@@ -2,6 +2,8 @@
 
 [![Tests](https://github.com/vmichalska/nikatime-timesheets-skill/actions/workflows/tests.yml/badge.svg)](https://github.com/vmichalska/nikatime-timesheets-skill/actions/workflows/tests.yml)
 
+<img width="1672" height="941" alt="ChatGPT Image Sep 30, 2026, 03_47_02 PM" src="https://github.com/user-attachments/assets/038a479b-4212-4719-a0c8-a68602b0b639" />
+
 An agent skill for safely inspecting and filling NikaTime web timesheets from
 Codex, Claude, or Cursor. It talks to NikaTime directly over HTTPS using a
 private local session cache, recovers that session from a dedicated Chrome
