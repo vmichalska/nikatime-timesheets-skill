@@ -82,6 +82,14 @@ ln -s "$HOME/.claude/skills/nikatime-timesheets" "$HOME/.cursor/skills/nikatime-
 
 Restart or reload an already-open client so it discovers the skill.
 
+The cloned skill automatically fast-forwards from its configured Git upstream
+before each CLI command. Automatic updates are enabled by default; set
+`NIKATIME_AUTO_UPDATE=0` to opt out. The updater never overwrites local changes,
+does nothing for copied or nested installations, and continues with the
+installed version if the remote is temporarily unavailable. When an update
+changes `scripts/package-lock.json`, it also refreshes the runtime dependencies
+before restarting the command into the updated version.
+
 ## Invoke
 
 In Codex:
